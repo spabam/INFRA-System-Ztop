@@ -1,0 +1,10 @@
+# Copy to /etc/systemd/zram-generator.conf  (package: systemd-zram-generator)
+#
+# This is the structural fix for an undersized disk swap: ~3:1 zstd compression
+# means a 0.6*RAM zram device costs roughly 0.2*RAM of real memory.
+# After enabling, demote the disk swap to overflow by adding pri=10 to its
+# /etc/fstab options, so zram (priority 100) is always used first.
+[zram0]
+zram-size = ram * 0.6
+compression-algorithm = zstd
+swap-priority = 100

@@ -1,0 +1,9 @@
+/var/log/ztop-ramcleaner.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 root root
+}

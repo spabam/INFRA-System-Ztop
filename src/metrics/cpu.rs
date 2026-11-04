@@ -15,6 +15,13 @@ pub fn logical_count(sys: &System) -> usize {
     sys.cpus().len().max(1)
 }
 
+/// Physical core count, or `None` when the platform does not expose it (some
+/// containers and virtual machines hide the topology). sysinfo re-parses
+/// `/proc/cpuinfo` on every call, so sample this once and cache the result.
+pub fn physical_count() -> Option<usize> {
+    System::physical_core_count().filter(|&n| n > 0)
+}
+
 pub fn brand(sys: &System) -> String {
     sys.cpus()
         .first()

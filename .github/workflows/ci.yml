@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Install CI tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq shellcheck python3-venv
+          test -x "$HOME/.venv/bin/python" || python3 -m venv "$HOME/.venv"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Run release tests
+        run: cargo test --locked --release
+
+      - name: Check shell scripts and release versions
+        run: |
+          shellcheck installer.sh ramcleaner/ztop-ramcleaner scripts/version.sh tests/version.sh
+          bash -n installer.sh
+          bash -n ramcleaner/ztop-ramcleaner
+          ./scripts/version.sh --check
+          ./tests/version.sh
+
+      - name: Test installer and memory decisions with fixtures
+        run: '"$HOME/.venv/bin/python" -m unittest discover -s tests/shell -v'
+
+      - name: Check installer dry run
+        run: ./installer.sh --check
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Smoke JSON output
+        run: |
+          ./target/release/ztop --no-config --json --top 1 --no-gpu --no-temp > /tmp/ztop.json
+          jq -e '
+            .schema_version == 2 and
+            (.sampled_at_unix_ms | type == "number") and
+            (.gpus | length == 0) and
+            (.procs | length <= 1)
+          ' /tmp/ztop.json
+
+      - name: Test streaming and terminal interactions
+        run: 'ZTOP_TEST_BIN=./target/release/ztop "$HOME/.venv/bin/python" tests/runtime.py'

@@ -1,0 +1,6 @@
+# Optional ZTOP memory-management companion. New configs preview only.
+# Failures remain visible in the companion's log and --status output.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+*/10 * * * * root __RC_BIN__ --quiet

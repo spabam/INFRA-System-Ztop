@@ -5,13 +5,485 @@ All notable changes to ZTOP are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Pre-release policy:** ZTOP is unreleased; every change set during development bumps the version in `Cargo.toml`. Numbers are not yet load-bearing public commitments — they exist so each rebuild has a verifiable, distinct identity. `./installer.sh` reports the version after install so the user can confirm the binary on `$PATH` matches the source tree.
+> **Release policy:** Starting with 0.9.0, release versions increase monotonically using SemVer. UTC build metadata identifies the build but does not affect precedence. Historical calendar-derived versions remain below. Use `scripts/version.sh` to prepare and validate release versions.
 
 ---
 
-## [Unreleased]
+## [0.9.9+20261104.0925] — 2026-11-04
 
-(nothing yet)
+### Removed
+
+- The `C` key and the hide-cores feature. The per-core rows can no longer be
+  hidden, so an accidental keypress cannot take them away.
+
+### Changed
+
+- Per-core rows take flexible screen space first, ahead of the history strip,
+  extra GPU panels, and the taller GPU panel. A 24-row terminal now shows
+  every core of a 14-thread host next to the process table; before, it showed
+  none. The rows are trimmed only when the terminal cannot hold them next to
+  the eight process rows and one three-row GPU panel.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  (71 passed, 1 ignored) green. The installed TUI was captured through a
+  pseudo-terminal at 151x35 and 80x24; both show the title counts and all 14
+  per-core cells.
+
+## [0.9.8+20261104.0921] — 2026-11-04
+
+### Changed
+
+- The CPU panel title is now just ` CPU · 12 cores / 14 threads `. The
+  `C hide/show per-core` key hint and the auto-fit notes no longer appear in
+  the title; `C` stays documented in the `?` help overlay and auto-fit limits
+  the per-core rows silently.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  green; the TUI was captured through a pseudo-terminal at 151x35 and 80x24.
+
+## [0.9.7+20261104.0908] — 2026-11-04
+
+### Fixed
+
+- The core and thread counts now sit in the CPU panel title, where the
+  per-core toggle hint used to stand alone:
+  ` CPU · 12 cores / 14 threads · C hide per-core `. 0.9.6 had put them on
+  the model line below, which is where nobody looked; the model line is back
+  to the brand string only. When the title does not fit, the key hint is
+  dropped before the counts. The auto-fit title keeps the counts too
+  (`showing 16/128 · auto-fit`, or `auto-fit · per-core hidden` when the
+  terminal is too short for any per-core row).
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  green; release build OK. The TUI was captured through a pseudo-terminal at
+  151x35 and 80x24 and shows the counts in the panel title.
+
+## [0.9.6+20261104.0809] — 2026-11-04
+
+### Fixed
+
+- CPU panel: the physical core and thread counts are shown next to the CPU
+  model again (`Intel(R) Core(TM) Ultra 5 125U · 12 cores / 14 threads`). The
+  physical count is read once at startup via sysinfo and cached, so the
+  per-tick refresh cost is unchanged. On narrow terminals the model name is
+  truncated before the counts are dropped; platforms that hide the topology
+  (some containers and virtual machines) show only the thread count. The
+  compact short-terminal summary shows the same counts instead of the
+  ambiguous `N cores`, which was actually the thread count.
+
+### Added
+
+- `cpu_physical_cores` in `--json` / `--json-stream` snapshots (`null` when
+  the platform hides it). Additive and nullable, so `schema_version` stays 2.
+- UI regression tests for the brand line, the compact summary, the unknown
+  physical-count fallback, and count survival under brand truncation.
+- Installer: every mutating run (`./installer.sh`, `--uninstall`, the
+  ramcleaner commands) restores ownership of the entire checkout, `.git/`
+  included, to the installing user right after taking the lock and again on
+  exit, success or failure. `sudo chown -Rf` runs only when foreign-owned
+  entries exist, so a clean tree never prompts. `ZTOP_OWNER=user:group`
+  overrides the detected owner; `--help` and `--check` stay read-only.
+
+### Documentation
+
+- Mandatory ownership rule: the entire checkout, including `.git/`, must
+  always be owned by `spabam:spabam`; any root process working in the tree
+  must build outside it and restore ownership before it finishes
+  (README §Install, SPEC §14, CLAUDE.md).
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and `cargo test` (71 passed, 1 ignored) green; release build OK.
+- `ztop --no-config --json --top 2` on the Intel Core Ultra 5 125U host reports
+  `cpu_physical_cores: 12` alongside 14 per-core entries.
+- 57 shell fixtures (six new for the ownership restore), ShellCheck, Bash
+  syntax, five runtime tests, and `scripts/version.sh --check` passed.
+
+## [0.9.5+20261102.1656] — 2026-11-02
+
+### Fixed
+
+- Installer: build in `$XDG_CACHE_HOME/ztop-target` (`~/.cache/ztop-target`)
+  instead of the checkout's `target/` unless `CARGO_TARGET_DIR` is set. Inside
+  a Dropbox-synced checkout the build died within seconds: Dropbox renamed the
+  selectively excluded `target/` to `target (Selective Sync Conflict)` and every
+  later cargo write failed with `No such file or directory`. The installer now
+  logs the build directory and names it when a build fails.
+- Installer: on a host without any NVIDIA runtime, the monitor's own
+  `GPU init failed` startup line is reported as information during
+  verification instead of as a second warning; it only restated the preflight
+  result. Hosts with NVIDIA files still see it as a warning.
+- Tests: the permission fixtures follow the new default build directory, a new
+  fixture covers `CARGO_TARGET_DIR`, `XDG_CACHE_HOME`, `HOME`, and the
+  `target/` fallback without a home directory, and a CPU-only fixture checks
+  the verification diagnostics.
+
+## [0.9.4+20261101.1627] — 2026-11-01
+
+- Stable process ordering: break sort ties by PID and treat non-finite readings as zero so the comparator stays a total order (no panic risk on Rust >= 1.81). Mark the active sort column in the process-table header with ▼.
+
+## [0.9.3+20261026.0923] — 2026-10-26
+
+### Fixed
+
+- Verify fresh GPU telemetry from the installed binary, including every device
+  reported by `nvidia-smi`. Installation and `--check` return nonzero when a
+  detected NVIDIA setup cannot produce valid samples, while CPU-only hosts
+  remain supported.
+- Preserve NVIDIA query errors and explain driver/library version mismatches.
+  Stop installing unnecessary NVIDIA development packages: the runtime
+  `libnvidia-ml.so.1` is sufficient.
+- Find the existing Rust toolchain during `--check` and avoid requesting sudo
+  for a writable user prefix when no system dependencies need installation.
+
+### Added
+
+- A private NVML fallback for hosts awaiting a driver repair or reboot. On a
+  system driver/library mismatch only, try the administrator-provided library
+  under `$PREFIX/lib/ztop/nvml/<loaded-driver-version>/libnvidia-ml.so.1`.
+  Healthy system NVML takes precedence, both NVML sessions use the same selected
+  library, and startup warns that the host mismatch remains unresolved.
+- Regression tests for library selection, driver-version path validation,
+  multi-GPU verification, missing/stale telemetry, driver errors, and writable
+  installation prefixes.
+
+### Validation
+
+- Rust 1.88 formatting, Clippy, release build, and 67 tests in each of debug and
+  release passed; one manual benchmark remained ignored. All 49 shell fixtures,
+  five runtime tests, ShellCheck, Bash syntax, and release-version checks passed.
+- Installed at `/usr/bin/ztop` on Debian 13/Proxmox. As the normal user, four
+  fresh NVIDIA A2 samples matched the compatible `nvidia-smi` device identity
+  and 15356 MiB memory capacity; the GPU terminal panel and clean quit passed.
+  The private 615.71.09 NVML runtime worked with the loaded 615.71.09 driver
+  despite system userspace packages being 615.71.10. No driver reload or reboot
+  was performed.
+
+## [0.9.2+20260905.2107] — 2026-09-05
+
+- Display per-process VRAM as a percentage of total memory across detected GPUs, with a VRAM% header and one decimal place, matching the other process resource columns.
+
+## [0.9.1+20260905.2102] — 2026-09-05
+
+- Correct the --no-pid-gpu guarantee: per-process accounting is skipped, but the NVIDIA driver may open /dev/nvidia-uvm during initialization or device queries. Use --no-gpu to skip NVML entirely. This supersedes the UVM claims in the historical 0.3.16 notes.
+
+## [0.9.0+20260905.2041] — 2026-09-05 — Accurate process accounting and dependable monitoring
+
+### Fixed
+
+- Explicitly disable sysinfo task enumeration at startup and refresh, preventing
+  threads from crowding out distinct processes in the table. Refresh only CPU
+  usage rather than unused frequency counters.
+- Key GPU history and failure grace by stable device identity. Preserve each
+  device through partial failures and recovery, distinguish missing readings
+  from zero, and retry transient/no-sample per-process utilization queries.
+- Parse installer inspection commands before any mutation; remove unrelated
+  authentication bootstrap and external recursive cleanup. Serialize mutations,
+  use locked Cargo builds, and detect PSI by reading its contents.
+- Address short-terminal overflow, long PIDs/CPU percentages, Unicode clipping,
+  Ctrl-C handling, and binary memory unit labels.
+
+### Added
+
+- Process search/filtering, viewport scrolling, collapsible core details, GPU
+  paging, and bounded histories for CPU/RAM/GPU/VRAM.
+- `--filter`, `--config`, `--no-config`, and positive GPU/temperature overrides.
+- `--json-stream` newline-delimited output with optional `--count`, filtering,
+  independent GPU sampling, and clean handling of closed output pipes.
+- Regression coverage for thread exclusion, device loss/recovery, compact
+  layouts, input handling, streaming, configuration precedence, shell actions,
+  and release version consistency; collection benchmark hook.
+
+### Changed
+
+- JSON schema **2** adds GPU identity, status, and observation timestamps;
+  unavailable GPU utilization and temperature are null. Stale/unavailable GPU
+  memory fields retain their last observed values and require checking status.
+- Normal installation installs only ZTOP. Ramcleaner is separately installed in
+  preview mode; automatic swap recycling is disabled by default and requires
+  fresh conservative headroom checks. Incomplete service parking is unavailable.
+  Action outcomes and swap restoration failures are visible in status/exit codes.
+  `--recover` restores pending swap while suspended without starting new actions;
+  invalid recovery metadata cannot arm the exit handler.
+- Release versions increase monotonically; `scripts/version.sh` synchronizes
+  component versions and checks consistency without relying on build metadata
+  for ordering.
+
+### Validation
+
+- Rust 1.88: formatting, Clippy, release build, and 62 tests in each of debug and
+  release passed. 28 shell fixtures, five runtime tests, and release-version
+  checks passed; real GPU snapshots worked unprivileged and as root.
+- Local paired TUI measurements reduced median CPU use from 1.833% to 0.667% of
+  one core with GPU/temperature collection disabled. Full conditions and hardware
+  limitations are recorded in `RELEASE.md`.
+
+## [0.8.18+20260818.2240] — 2026-08-18 — ramcleaner: non-disruptive RAM/swap optimiser
+
+### Added
+
+- New `ramcleaner/` component: `ztop-ramcleaner`, a tiered RAM/swap optimiser
+  that reclaims memory **without terminating any process**. It only moves pages
+  — cgroup-v2 proactive reclaim (`memory.reclaim`), free-page compaction, and
+  guarded swap recycling — so applications, browser tabs, and desktop sessions
+  all survive every pass. No `kill`, no OOM handling, no process discarding.
+- Four tiers, each with its own trigger and cooldown: T1 proactive reclaim of
+  cold pages per cgroup slice, T2 `vm.compact_memory`, T3 `swapoff`/`swapon` to
+  empty stale swap, T4 parking long-idle *system services* (opt-in, default off,
+  never user applications).
+- `installer.sh` gained `--install-ramcleaner`, `--uninstall-ramcleaner`, and
+  `--install-ramcleaner-tuning`. A full `install` now also installs ramcleaner
+  (skip with `NO_RAMCLEANER=1`); `--uninstall` removes it again.
+- ramcleaner runs from `/etc/cron.d/ztop-ramcleaner` every 10 minutes and is
+  installed **active**, so a plain `./installer.sh` yields automatic RAM/swap
+  optimisation with no follow-up step. Every action is non-destructive by
+  construction, so acting is the default; `RAMCLEANER_DRY_RUN=1 ./installer.sh`
+  installs it inert for preview, and the installer runs one verification pass
+  immediately rather than leaving the first proof to a cron run 10 minutes away.
+- The installer now pre-authenticates sudo before the long bootstrap/build
+  stages, explaining why root is needed instead of surfacing an unannounced
+  password prompt mid-build. With no TTY it fails with actionable guidance
+  (`sudo ./installer.sh`, `sudo -v` first, or `SUDO_ASKPASS=`) rather than
+  sudo's bare "a terminal is required".
+- `installer.sh --check` now reports ramcleaner presence, its armed/dry-run
+  mode, whether kernel PSI is available, and whether zram swap is active.
+- Reference configs for the two structural prerequisites that matter more than
+  the cron job itself: `zram-generator.conf.example` and optional `vm.*` sysctl
+  tuning in `99-ztop-ramcleaner.sysctl.conf`.
+
+### Fixed
+
+- `installer.sh --help` printed the VANTAGE bootstrap prologue instead of the
+  usage banner: the hardcoded `sed -n '2,21p'` range no longer matched after the
+  prologue was prepended. The range is now located by marker at runtime, so it
+  cannot drift again, and it resolves via `$SELF`/`BASH_SOURCE` so it is also
+  correct when the installer is sourced rather than executed.
+- `installer.sh` ignored `CARGO_TARGET_DIR` and looked for the built binary
+  under `$HERE/target` unconditionally, so a build redirected elsewhere failed
+  with "build did not produce ...". It now looks where cargo actually wrote it.
+
+### Fixed (concurrent-run safety)
+
+- **A non-building subcommand could destroy a concurrent build.** The VANTAGE
+  prologue arms an EXIT trap that `rm -rf`s build-artifact directories
+  (`target/`, `cache/`, `build/`, ...) under the repo, and it was armed
+  unconditionally before argument parsing. So `--check` or `--install-ramcleaner`
+  -- which build nothing -- would, on exit, delete the `target/` of a
+  *concurrently running* `./installer.sh` build, killing it with
+  "failed to create file target/release/.fingerprint/.../output-bin-ztop"
+  and rustc exiting 101 on a truncated JSON stream. Every non-building
+  subcommand now disarms the trap first; only a run that actually built
+  something may clean up after itself.
+- `install` now takes an flock (`$TMPDIR/ztop-installer.lock`) so two concurrent
+  installs serialise instead of corrupting a shared `target/`. It degrades to
+  proceeding unlocked if flock or the lockfile is unavailable, so it cannot
+  wedge the installer.
+- The shared `VANTAGE/.installer_cleanup.sh` is deliberately left untouched:
+  other VANTAGE installers depend on its semantics.
+
+### Fixed (ramcleaner T3 multi-device accounting)
+
+- T3 gated on *total* swap utilisation while only ever `swapoff`-ing a single
+  device, so adding a second swap device silently disabled the tier: with a
+  980 MiB partition plus a 3 GiB file, the 80% trigger needed 3.2 GiB used and
+  would then have demanded 5.3 GiB of RAM headroom — unreachable on an 8 GiB
+  host. Trigger and headroom gate are now both per-device.
+- The headroom gate also credits free space on the *other* swap devices, since
+  pages leaving the target device land there before spilling into RAM. Only the
+  unabsorbed remainder is charged against `MemAvailable`.
+
+### Security
+
+- T3's headroom gate is enforced as an invariant rather than a trigger.
+  `swapoff` must fit every swapped page back into RAM; below
+  `MemAvailable > swap_used × 1.5 + 512 MB` (or at high load) it is refused, and
+  `tier3_is_safe` is re-checked inside the action so `--force-tier 3` cannot
+  induce an OOM kill. `swapoff` additionally runs under `timeout`, and failure
+  is a no-op that leaves swap untouched.
+- `--force-tier N` overrides the cooldown for tier N only, no longer for every
+  other tier as well.
+
+---
+
+## [0.7.6+20260706.1612] — 2026-07-06 — Contract, JSON, diagnostics, and CI hardening
+
+### Added
+
+- JSON snapshots now carry `schema_version: 1` and `sampled_at_unix_ms`, with
+  the unit contract documented in README, SPEC, and CLI help.
+- Added a narrow `GpuBackend` abstraction so collector behavior can be tested
+  with fake GPU backends instead of requiring live NVIDIA hardware.
+- Added `--verbose` for detailed GPU startup diagnostics. Default startup is
+  now quiet except for actionable failures; `ZTOP_DEBUG_GPU` remains the
+  per-poll diagnostics file path.
+- Added `RELEASE.md` and replaced the stale v0.1 SPEC with the current
+  engineering contract.
+
+### Tests
+
+- Added fake-GPU collector tests for multi-GPU samples and transient NVML
+  failure grace behavior.
+- Added JSON headless-path coverage for `--top`, `--no-gpu`, `--no-temp`, and
+  schema metadata.
+- Added ratatui `TestBackend` rendering checks for the minimum width warning,
+  table column breakpoints, help overlay, multi-GPU titles, and high-core-count
+  CPU wrapping.
+- CI now runs release-mode tests, shellchecks the installer, runs installer
+  `--check`, builds the release binary, and asserts the JSON smoke schema with
+  `jq`.
+
+## [0.7.6] — 2026-07-06 — Calendar-derived versioning
+
+### Changed
+
+- **Version numbers are now calendar-derived: `MAJOR.MONTH.DAY`.** The minor
+  number is the month and the patch number is the day of the modification
+  (UTC): a change on June 2 produces `0.6.2`, on July 1 `0.7.1`; today's
+  change makes this release `0.7.6`. The `+YYYYMMDD.HHMM` build-metadata
+  timestamp introduced with 0.4.0 is retained — it distinguishes multiple
+  same-day modifications and keeps builds orderable across year boundaries
+  (after `0.12.31` the next January modification is `0.1.1`). `MAJOR` remains
+  the only manually chosen number. Documented in README §Versioning,
+  `Cargo.toml`, and `CLAUDE.md`; the jump from 0.4.0 straight to 0.7.6 is
+  this scheme taking effect, not three skipped feature releases.
+
+## [0.4.0] — 2026-07-06 — Multi-GPU, config file, JSON output, event-loop fixes
+
+### Added
+
+- **Timestamped versions.** The `Cargo.toml` version now carries semver build
+  metadata in the form `+YYYYMMDD.HHMM` (UTC), refreshed on every modification
+  so `ztop --version` pins the exact source-tree state a binary came from.
+  The convention is documented in README §Versioning and applies to all
+  future changes.
+- **Version in the dashboard.** The header shows the running version next to
+  the `ZTOP` title (full timestamped form on terminals ≥ 100 columns, bare
+  `vMAJOR.MINOR.PATCH` on narrower ones so host/uptime stay visible).
+
+- **Multi-GPU support.** Every NVIDIA device now gets its own panel (labeled
+  `GPU0:`, `GPU1:`, … when more than one is present). Per-process VRAM is
+  summed across devices; per-process GPU% reports the busiest device so the
+  column stays on a 0–100 scale. Devices that fail to poll individually are
+  skipped for that sample instead of blanking the others.
+- **Configuration file.** `~/.config/ztop/config.toml` ($XDG_CONFIG_HOME
+  honored) with `refresh_interval`, `sort_by`, `top_processes`, `show_gpu`,
+  `show_temperatures`, `pid_gpu`, and `gpu_peak_hold`. Explicit command-line
+  flags always win; unknown keys and out-of-range values are rejected with a
+  clear error.
+- **`--json` headless mode.** Prints one pretty-printed metrics snapshot
+  (host, CPU, memory, per-GPU, top-N processes) to stdout and exits without
+  entering the TUI — usable from scripts and cron.
+- **Live row count.** `[` / `]` adjust the number of process rows shown
+  (1..200) while running; the footer shows the current count.
+- **`?` help overlay.** A centered popup lists all key bindings; Esc closes
+  the overlay before it quits the app.
+- Project is now tracked in git, and CI lints test targets too
+  (`clippy --all-targets`).
+
+### Fixed
+
+- **Terminal resize now redraws immediately.** Resize events were ignored by
+  the event loop, leaving a stale layout until the next tick — or forever
+  while paused.
+- **Transient NVML failures no longer blank the GPU panel.** The last good
+  sample is kept for up to 8 consecutive failed polls (~2 s) before the panel
+  degrades to `n/a`, preserving peak-hold continuity across driver hiccups.
+- **Mouse capture removed.** ztop never used mouse input; capturing it broke
+  terminal text selection/copy and woke the event loop on every scroll.
+- A non-press key event (release/repeat) no longer skips a due refresh tick.
+- `ZTOP_DEBUG_GPU` diagnostics no longer write to stderr mid-TUI (which
+  corrupted the alternate screen); they append to the file named by the
+  variable's value (empty or `1` = `ztop-gpu-debug.log` in the system temp
+  directory).
+- The raw NVML session opened for the v2 memory API is now explicitly shut
+  down on exit.
+
+### Changed
+
+- **Steady-state CPU cost cut ~12x** (measured 25.8% → 2.1% of one core with
+  GPU sampling, 17.8% → 1.5% without, on a 32-core host with ~670 processes
+  at the default 1 s refresh). Two causes fixed: sysinfo was walking every
+  `/proc/<pid>/task/*` thread as a full process entry each tick (~2,500 extra
+  file reads/s on that host), and it was reading disk-I/O counters plus the
+  `exe` symlink for every PID every tick. ztop now requests only cpu, memory,
+  user (once per process), and cmdline (once per process). This also fixes a
+  latent bug where processes spawned after startup showed a bare name and `?`
+  user because the incremental refresh never fetched cmd/user at all.
+- sysinfo upgraded 0.32 → 0.38 (needed for the per-thread walk opt-out;
+  still builds on the pinned Rust 1.88).
+- **Pause now means quiet.** While paused, the 250 ms GPU sampling stops too,
+  so a paused ztop costs (almost) nothing.
+- Per-process command lines are cached per process lifetime
+  (keyed by PID + start time) instead of being rebuilt from argv every tick —
+  the main steady-state allocation cost on busy hosts.
+- The process-table COMMAND column now uses the full remaining terminal width
+  instead of truncating at a fixed 64 characters.
+- The footer was slimmed to state (`sort`, `paused`, `rows`) plus `q quit` and
+  `? help`; the full key list lives in the `?` overlay.
+- Redundant double system scan removed from collector startup.
+
+### Tests
+
+- New unit tests for the temperature-source selection (hwmon preference,
+  label matching, thermal-zone fallback — via fixture sysfs trees), process
+  sorting including the normalized `total` score, per-PID GPU merging across
+  devices, config parsing/precedence, and the `[`/`]` clamping. 29 tests total
+  (up from 11).
+
+- Installer now aborts with a clear message — before any build or sudo
+  prompt — when `target/` or `Cargo.lock` contains artifacts owned by another
+  user (e.g. after a build ran as root), naming the exact `chown` fix. On
+  that failure path the VANTAGE cleanup EXIT trap is disarmed too: it cannot
+  delete a foreign-owned `target/` either, and its `sudo rm -rf` fallback
+  used to surface a confusing password prompt right after the error message. The
+  build step also gained an explicit `|| die`, so a failed build can never
+  fall through and install a stale `target/release/ztop`. Previously this
+  scenario surfaced as a cryptic cargo `Permission denied` followed by a
+  surprise sudo password prompt (the VANTAGE cleanup trap attempting
+  `sudo rm -rf` on the root-owned `target/`).
+
+### Fixed (installer & docs, folded in from the pre-0.4.0 unreleased queue)
+
+- Installer now checks the active `rustc` version before building. If a distro
+  toolchain is present but too old for the locked dependency graph, it installs
+  and uses the pinned Rust 1.88.0 toolchain via rustup instead of failing during
+  `cargo build`.
+- Installer now prints elapsed progress lines during long Rust toolchain
+  installs and release builds, so quiet downloads do not look hung.
+- Fixed the rustup bootstrap path after adding visible download progress: when
+  the installer saves `sh.rustup.rs` to a temp file, it now invokes that script
+  directly instead of passing the stdin-only `-s --` shell arguments.
+- Installer Rust bootstrap now installs only the minimal build toolchain first;
+  clippy/rustfmt are left to CI/development setup so optional component download
+  failures cannot block installing the binary.
+- Project metadata, CI, and documentation now consistently declare Rust 1.88 as
+  the minimum supported toolchain.
+- Fixed stale source commentary about per-process GPU opt-in; the implemented
+  switch is `--no-pid-gpu`.
+
+## [0.3.17] — 2026-05-25 — README documents `--no-pid-gpu`
+
+### Documented
+
+- README's Command-Line Usage section now lists `--no-pid-gpu` alongside `--no-gpu`, with a short note explaining the `lsof /dev/nvidia-uvm` use case. Without this entry the only place the flag was discoverable was `ztop --help`.
+- Project Status block bumped to 0.3.17 and now mentions the `--no-pid-gpu` capability in the running feature summary.
+
+## [0.3.16] — 2026-05-24 — Optional UVM-free GPU mode
+
+### Added
+
+- New `--no-pid-gpu` flag disables only the per-process VRAM/GPU% accounting. With it set, ztop never calls the NVML APIs (`running_compute_processes`, `running_graphics_processes`, `process_utilization_stats`) that cause NVML to open `/dev/nvidia-uvm` for inventory queries. Device-level GPU metrics (utilization, temperature, VRAM totals) keep working. Useful when auditing GPU clients with `lsof /dev/nvidia*` — ztop will no longer appear among `/dev/nvidia-uvm` holders. Default behaviour is unchanged: all per-process columns are populated and ztop transparently uses NVML's process tables.
+
+### Documented
+
+- Clarified in the help text and README that ztop opening `/dev/nvidia-uvm` is a read-only NVML inventory side effect, not a CUDA context, and does not allocate or hold GPU memory. This is to prevent the common misdiagnosis where stale VRAM from a dead inference runner is blamed on monitoring tools that share NVML.
 
 ## [0.3.15] — 2026-05-20 — Installer NVML symlink helper
 

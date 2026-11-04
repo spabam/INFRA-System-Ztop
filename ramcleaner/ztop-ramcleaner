@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 Andrea Bodei <info@andreabodei.com>
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Optional memory-management companion. Preview is the default; actions can
+# introduce latency and memory pressure. No guarantee against workload OOM.
+#
+# Usage:
+#   ztop-ramcleaner --status        # metrics, capabilities and recorded outcomes
+#   ztop-ramcleaner --dry-run       # preview decisions; log only
+#   ztop-ramcleaner --apply         # one active pass of enabled tiers
+#   ztop-ramcleaner --recover       # restore pending swap only, even while suspended
+#   ztop-ramcleaner --force-tier N  # force an ENABLED tier (1..3), keeping safety gates
+#   ztop-ramcleaner --version
+#
+# Config: /etc/ztop/ramcleaner.conf   State: /var/lib/ztop-ramcleaner/state
+# Suspend scheduled passes: sudo touch /run/ztop-ramcleaner.disable
+set -uo pipefail
+
+RC_VERSION="0.9.9+20261104.0925"
+CONFIG="${ZTOP_RC_CONFIG:-/etc/ztop/ramcleaner.conf}"
+STATE_DIR="${ZTOP_RC_STATE_DIR:-/var/lib/ztop-ramcleaner}"
+LOG="${ZTOP_RC_LOG:-/var/log/ztop-ramcleaner.log}"
+LOCK=/run/ztop-ramcleaner.lock
+DISABLE_FLAG=/run/ztop-ramcleaner.disable
+PROC_ROOT=/proc
+CGROUP_ROOT=/sys/fs/cgroup
+FSTAB=/etc/fstab
+
+DRY_RUN=1
+VERBOSE=0
+ENABLE_T1_RECLAIM=1
+ENABLE_T2_COMPACT=1
+ENABLE_T3_SWAP_RECYCLE=0
+ENABLE_T4_PARK_SERVICES=0
+T1_AVAIL_MB=2600
+T1_PSI_SOME_AVG60=5
+T1_COOLDOWN=1200
+T2_AVAIL_MB=1500
+T2_COOLDOWN=3600
+T3_SWAP_USED_PCT=80
+T3_HEADROOM_FACTOR=15
+T3_HEADROOM_FLOOR_MB=512
+T3_LOAD_FACTOR=7
+T3_COOLDOWN=21600
+T3_SWAPOFF_TIMEOUT=120
+RECLAIM_TARGETS=("system.slice:10:256" "user.slice:8:384")
+FORCE_TIER=""
+ACTION=once
+OUTCOME=skipped
+SWAP_RECOVERY_DEV=""
+SWAP_RECOVERY_PRIORITY=""
+SWAP_RECOVERY_OPTIONS=""
+
+log() {
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG" || return 1
+    if (( VERBOSE )); then printf '%s\n' "$*" >&2; fi
+}
+vlog() { if (( VERBOSE )); then printf '%s\n' "$*" >&2; fi; }
+die() { printf 'ztop-ramcleaner: %s\n' "$*" >&2; exit 1; }
+
+load_config() {
+    if [ -r "$CONFIG" ]; then
+        # Configuration is trusted operator-owned Bash, not data from a workload.
+        # shellcheck source=/dev/null
+        . "$CONFIG" || die "failed to parse $CONFIG"
+    fi
+    STATE="$STATE_DIR/state"
+}
+
+validate_config() {
+    local key value spec path pct cap
+    for key in DRY_RUN VERBOSE ENABLE_T1_RECLAIM ENABLE_T2_COMPACT ENABLE_T3_SWAP_RECYCLE ENABLE_T4_PARK_SERVICES; do
+        [[ "${!key}" =~ ^[01]$ ]] || die "$key must be 0 or 1"
+    done
+    (( ENABLE_T4_PARK_SERVICES == 0 )) || die "T4 is unavailable until service-specific idle probes are implemented"
+    for key in T1_AVAIL_MB T1_COOLDOWN T2_AVAIL_MB T2_COOLDOWN T3_SWAP_USED_PCT T3_HEADROOM_FACTOR T3_HEADROOM_FLOOR_MB T3_LOAD_FACTOR T3_COOLDOWN T3_SWAPOFF_TIMEOUT; do
+        value="${!key}"
+        [[ "$value" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "$key must be an integer from 0 to 999999999"
+    done
+    [[ "$T1_PSI_SOME_AVG60" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "invalid PSI threshold"
+    (( T3_SWAP_USED_PCT <= 100 && T3_HEADROOM_FACTOR >= 10 && T3_HEADROOM_FLOOR_MB >= 512 && T3_SWAPOFF_TIMEOUT > 0 )) || die "invalid T3 thresholds (factor >= 10, floor >= 512 MB, timeout > 0 required)"
+    for spec in "${RECLAIM_TARGETS[@]}"; do
+        IFS=: read -r path pct cap <<<"$spec"
+        [[ "$path" =~ ^[a-zA-Z0-9_.@/-]+$ && "$path" != /* && "$path" != *..* ]] || die "invalid reclaim path: $path"
+        [[ "$pct" =~ ^[1-9][0-9]?$ || "$pct" == 100 ]] || die "invalid reclaim percentage: $pct"
+        [[ "$cap" =~ ^[1-9][0-9]{0,6}$ ]] || die "invalid reclaim cap: $cap"
+    done
+    if [ -n "$FORCE_TIER" ]; then
+        key="ENABLE_T${FORCE_TIER}_"
+        case "$FORCE_TIER" in
+            1) key+=RECLAIM ;;
+            2) key+=COMPACT ;;
+            3) key+=SWAP_RECYCLE ;;
+            *) die "T4 is unavailable; --force-tier accepts enabled tiers 1..3" ;;
+        esac
+        (( ${!key} )) || die "tier $FORCE_TIER is disabled; enable it explicitly in $CONFIG first"
+    fi
+}
+
+state_value() { awk -F= -v k="$1" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$STATE" 2>/dev/null; }
+state_set() {
+    (( DRY_RUN )) && return 0
+    local tmp
+    tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || return 1
+    if { if [ -f "$STATE" ]; then awk -F= -v k="$1" '$1!=k' "$STATE"; fi; printf '%s=%s\n' "$1" "$2"; } >"$tmp" && mv -f "$tmp" "$STATE"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+record_outcome() {
+    local tier="$1" outcome="$2" detail="$3"
+    log "$tier $outcome $detail" || return 1
+    (( DRY_RUN )) && return 0
+    state_set "${tier}_outcome" "$outcome" && state_set "${tier}_detail" "$detail" && state_set "${tier}_attempt" "$(date +%s)" || return 1
+    if [ "$outcome" = succeeded ]; then
+        state_set "${tier}_last" "$(date +%s)" || return 1
+    fi
+}
+cooldown_ok() {
+    [ "$FORCE_TIER" = "$1" ] && return 0
+    local last
+    last=$(state_value "t${1}_last")
+    [ -z "$last" ] && return 0
+    [[ "$last" =~ ^[0-9]+$ ]] || return 1
+    (( $(date +%s) - last >= $2 ))
+}
+
+meminfo_mb() { awk -v k="$1:" '$1==k && $2 ~ /^[0-9]+$/ {printf "%.0f", int($2/1024); found=1; exit} END {if(!found) exit 1}' "$PROC_ROOT/meminfo"; }
+collect_metrics() {
+    MEM_TOTAL_MB=$(meminfo_mb MemTotal) && AVAIL_MB=$(meminfo_mb MemAvailable) && SWAP_TOTAL_MB=$(meminfo_mb SwapTotal) && SWAP_FREE_MB=$(meminfo_mb SwapFree) || return 1
+    local value
+    for value in "$MEM_TOTAL_MB" "$AVAIL_MB" "$SWAP_TOTAL_MB" "$SWAP_FREE_MB"; do
+        [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    done
+    (( MEM_TOTAL_MB > 0 && AVAIL_MB <= MEM_TOTAL_MB && SWAP_FREE_MB <= SWAP_TOTAL_MB )) || return 1
+    SWAP_USED_MB=$(( SWAP_TOTAL_MB - SWAP_FREE_MB ))
+    SWAP_USED_PCT=0
+    if (( SWAP_TOTAL_MB > 0 )); then SWAP_USED_PCT=$(( SWAP_USED_MB * 100 / SWAP_TOTAL_MB )); fi
+    PSI=$(awk '/^some/ {for(i=1;i<=NF;i++) if($i ~ /^avg60=/) {sub(/avg60=/,"",$i); print $i; exit}}' "$PROC_ROOT/pressure/memory" 2>/dev/null) || PSI=""
+    NCPU=$(nproc) || return 1
+    LOAD1=$(awk '{print $1}' "$PROC_ROOT/loadavg") || return 1
+    [[ "$NCPU" =~ ^[1-9][0-9]*$ && "$LOAD1" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    LOAD1_X10=$(awk -v n="$LOAD1" 'BEGIN {printf "%.0f", int(n*10)}')
+}
+metrics_line() {
+    printf 'avail=%sM/%sM swap=%sM/%sM(%s%%) psi=%s load1=%s/%scpu' "$AVAIL_MB" "$MEM_TOTAL_MB" "$SWAP_USED_MB" "$SWAP_TOTAL_MB" "$SWAP_USED_PCT" "${PSI:-unavailable}" "$LOAD1" "$NCPU"
+}
+cgroup_current_mb() { awk '{printf "%.0f", int($1/1048576)}' "$CGROUP_ROOT/$1/memory.current" 2>/dev/null; }
+poke() {
+    if (( DRY_RUN )); then log "DRY would write '$1' -> $2"; return; fi
+    { printf '%s' "$1" >"$2"; } 2>/dev/null
+}
+
+# Missing optional kernel capabilities are skipped and reported. A failed write
+# is different: EAGAIN may have reclaimed part of the request, so observe usage.
+tier1_reclaim() {
+    local spec path pct cap cur after want eligible=0 failed=0 partial=0 succeeded=0
+    OUTCOME=skipped
+    for spec in "${RECLAIM_TARGETS[@]}"; do
+        IFS=: read -r path pct cap <<<"$spec"
+        if [ ! -r "$CGROUP_ROOT/$path/memory.current" ] || [ ! -e "$CGROUP_ROOT/$path/memory.reclaim" ]; then
+            log "T1 skip $path: cgroup v2 memory.reclaim unavailable" || return 1
+            continue
+        fi
+        cur=$(cgroup_current_mb "$path") || { failed=1; continue; }
+        [[ "$cur" =~ ^[0-9]+$ ]] || { failed=1; continue; }
+        want=$(( cur * pct / 100 )); (( want > cap )) && want=$cap
+        (( want < 16 )) && continue
+        eligible=1
+        if poke "${want}M" "$CGROUP_ROOT/$path/memory.reclaim"; then
+            succeeded=1
+        else
+            failed=1
+            after=$(cgroup_current_mb "$path") || after="$cur"
+            if [[ "$after" =~ ^[0-9]+$ ]] && (( after < cur )); then partial=1; fi
+            log "T1 write refused for $path (before=${cur}M after=${after}M; reclaim may be partial)" || return 1
+        fi
+    done
+    if (( failed )); then
+        OUTCOME=failed
+        (( partial || succeeded )) && OUTCOME=partial
+        return 1
+    fi
+    if (( eligible )); then OUTCOME=succeeded; fi
+}
+tier2_compact() {
+    OUTCOME=skipped
+    [ -e "$PROC_ROOT/sys/vm/compact_memory" ] || { log "T2 skip: compact_memory unavailable"; return; }
+    if poke 1 "$PROC_ROOT/sys/vm/compact_memory"; then OUTCOME=succeeded; else OUTCOME=failed; return 1; fi
+}
+
+swap_disk_device() { awk 'NR>1 && $2=="partition" && $1 !~ /^\/dev\/zram/ {print $1; exit}' "$PROC_ROOT/swaps"; }
+swap_device_field() { awk -v d="$1" -v f="$2" 'NR>1 && $1==d {print $f; found=1; exit} END {if(!found) exit 1}' "$PROC_ROOT/swaps"; }
+swap_active() { swap_device_field "$1" 1 >/dev/null; }
+tier3_is_safe() {
+    local dev="$1" used need
+    used=$(swap_device_field "$dev" 4) || return 1
+    [[ "$used" =~ ^[0-9]+$ ]] || return 1
+    # Budget for every page on this device, rounded up. Other swap capacity
+    # is not assumed to absorb pages or provide a reservation against new work.
+    used=$(( (used + 1023) / 1024 ))
+    need=$(( used * T3_HEADROOM_FACTOR / 10 + T3_HEADROOM_FLOOR_MB ))
+    if (( AVAIL_MB <= need || LOAD1_X10 >= NCPU * T3_LOAD_FACTOR )); then
+        log "T3 skip: need >${need}M RAM for $dev and low load; $(metrics_line)"
+        return 1
+    fi
+}
+
+# Read into locals first: the EXIT trap must never act on rejected state.
+load_pending_recovery() {
+    local device priority options
+    device=$(state_value recovery_device)
+    [ -n "$device" ] || return 0
+    priority=$(state_value recovery_priority)
+    options=$(state_value recovery_options)
+    if [[ ! "$device" =~ ^/dev/[a-zA-Z0-9_./-]+$ || "$device" =~ (^|/)\.\.?(/|$) || ! "$priority" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        die "invalid recovery state; inspect $STATE (no recovery attempted)"
+    fi
+    (( priority <= 32767 )) || die "invalid recovery priority; inspect $STATE (no recovery attempted)"
+    [[ "$options" =~ ^[a-zA-Z0-9_,=:.+/-]*$ ]] || die "invalid recovery options; inspect $STATE (no recovery attempted)"
+    [ -r "$PROC_ROOT/swaps" ] || die "cannot inspect active swap; recovery not attempted"
+    command -v swapon >/dev/null 2>&1 || die "recovery prerequisite missing: swapon"
+    SWAP_RECOVERY_DEV="$device"
+    SWAP_RECOVERY_PRIORITY="$priority"
+    SWAP_RECOVERY_OPTIONS="$options"
+}
+
+acquire_active_lock() {
+    exec 9>"$LOCK" || die "cannot open $LOCK"
+    local lock_status
+    if flock -n -E 75 9; then
+        return 0
+    else
+        lock_status=$?
+        if [ "$lock_status" -eq 75 ]; then return 75; fi
+        die "failed to acquire $LOCK (status=$lock_status)"
+    fi
+}
+
+do_recover() {
+    local executable
+    for executable in id awk date flock mktemp mv swapon; do
+        command -v "$executable" >/dev/null 2>&1 || die "recovery prerequisite missing: $executable"
+    done
+    [ "$(id -u)" -eq 0 ] || die "swap recovery requires root"
+    acquire_active_lock || die "another pass is running; retry --recover after it finishes"
+    # This explicit repair bypasses suspension and tier settings, and never
+    # collects metrics, reclaims memory, compacts, or starts a swap recycle.
+    load_pending_recovery
+    if [ -z "$SWAP_RECOVERY_DEV" ]; then
+        printf 'ztop-ramcleaner: no pending swap recovery\n'
+        return 0
+    fi
+    if recover_swap; then
+        record_outcome recovery succeeded "pending swap restored; no other actions taken"
+    else
+        record_outcome recovery failed "swap recovery required" || true
+        return 1
+    fi
+}
+
+clear_recovery() {
+    state_set recovery_device "" || return 1
+    SWAP_RECOVERY_DEV=""
+}
+recover_swap() {
+    [ -n "$SWAP_RECOVERY_DEV" ] || return 0
+    if swap_active "$SWAP_RECOVERY_DEV"; then clear_recovery; return; fi
+    if (( DRY_RUN )); then
+        log "DRY recovery needed for $SWAP_RECOVERY_DEV; run --recover to retry"
+        return 1
+    fi
+    local args=()
+    [ -z "$SWAP_RECOVERY_OPTIONS" ] || args+=(--options "$SWAP_RECOVERY_OPTIONS")
+    args+=(--priority "$SWAP_RECOVERY_PRIORITY")
+    if swapon "${args[@]}" -- "$SWAP_RECOVERY_DEV" && swap_active "$SWAP_RECOVERY_DEV"; then
+        log "T3 recovered $SWAP_RECOVERY_DEV with priority $SWAP_RECOVERY_PRIORITY" || return 1
+        clear_recovery
+    else
+        log "T3 FAILED: $SWAP_RECOVERY_DEV remains off; recovery will retry on the next active pass" || true
+        printf 'ztop-ramcleaner: run sudo ztop-ramcleaner --recover; manual fallback: swapon --options %q --priority %s -- %q\n' "$SWAP_RECOVERY_OPTIONS" "$SWAP_RECOVERY_PRIORITY" "$SWAP_RECOVERY_DEV" >&2
+        return 1
+    fi
+}
+recovery_on_exit() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [ -n "$SWAP_RECOVERY_DEV" ] && ! recover_swap; then status=1; fi
+    exit "$status"
+}
+
+tier3_swap_recycle() {
+    OUTCOME=skipped
+    local dev priority options status
+    dev=$(swap_disk_device) || { OUTCOME=failed; return 1; }
+    [ -n "$dev" ] || return 0
+    priority=$(swap_device_field "$dev" 5) || { OUTCOME=failed; return 1; }
+    # Negative priorities are assigned automatically by the kernel and cannot
+    # be restored exactly; require an explicit priority for automatic recycling.
+    if [[ ! "$priority" =~ ^[0-9]+$ ]] || (( priority > 32767 )); then
+        log "T3 skip $dev: configure an explicit nonnegative swap priority before recycling"
+        return
+    fi
+    [[ "$dev" =~ ^/dev/[a-zA-Z0-9_./-]+$ ]] || { OUTCOME=failed; return 1; }
+    options=$(findmnt --fstab --evaluate --tab-file "$FSTAB" --types swap --source "$dev" --noheadings --output OPTIONS) || {
+        log "T3 skip $dev: no unambiguous fstab configuration available"
+        return
+    }
+    [[ -n "$options" && "$options" != *$'\n'* ]] || { OUTCOME=failed; return 1; }
+    # Refresh after earlier tiers and configuration inspection, directly before
+    # the selected-device headroom check and swapoff. This is a guard, not a
+    # guarantee: other processes can allocate concurrently throughout swapoff.
+    collect_metrics || { OUTCOME=failed; return 1; }
+    tier3_is_safe "$dev" || return 0
+    if (( DRY_RUN )); then
+        log "DRY would recycle $dev (priority=$priority options=$options)"
+        OUTCOME=succeeded
+        return 0
+    fi
+    # Persist recovery intent before disabling swap; a subsequent --recover can
+    # recover after a crash. Options and priority are persisted before the marker.
+    if ! { state_set recovery_priority "$priority" && state_set recovery_options "$options" && state_set recovery_device "$dev"; }; then
+        OUTCOME=failed
+        return 1
+    fi
+    SWAP_RECOVERY_DEV="$dev"; SWAP_RECOVERY_PRIORITY="$priority"; SWAP_RECOVERY_OPTIONS="$options"
+    if ! collect_metrics; then OUTCOME=failed; return 1; fi
+    if ! tier3_is_safe "$dev"; then clear_recovery; return; fi
+    if timeout --kill-after=5 "$T3_SWAPOFF_TIMEOUT" swapoff -- "$dev"; then
+        status=0
+    else
+        status=$?
+        log "T3 swapoff $dev failed (status=$status); checking actual device state" || true
+    fi
+    if ! recover_swap; then OUTCOME=failed; return 1; fi
+    if (( status != 0 )); then OUTCOME=failed; return 1; fi
+    OUTCOME=succeeded
+}
+
+psi_over() { [ -n "$PSI" ] && awk -v a="$PSI" -v b="$1" 'BEGIN {exit !(a>b)}'; }
+tier1_should_run() { (( ENABLE_T1_RECLAIM )) && cooldown_ok 1 "$T1_COOLDOWN" && { (( AVAIL_MB < T1_AVAIL_MB )) || psi_over "$T1_PSI_SOME_AVG60"; }; }
+tier2_should_run() { (( ENABLE_T2_COMPACT )) && cooldown_ok 2 "$T2_COOLDOWN" && (( AVAIL_MB < T2_AVAIL_MB )); }
+tier3_should_run() {
+    (( ENABLE_T3_SWAP_RECYCLE )) && cooldown_ok 3 "$T3_COOLDOWN" || return 1
+    local dev used size
+    dev=$(swap_disk_device); [ -n "$dev" ] || return 1
+    used=$(swap_device_field "$dev" 4) && size=$(swap_device_field "$dev" 3) || return 1
+    [[ "$used" =~ ^[0-9]+$ && "$size" =~ ^[1-9][0-9]*$ ]] || return 1
+    (( used * 100 / size >= T3_SWAP_USED_PCT ))
+}
+
+check_prerequisites() {
+    local executable
+    for executable in awk date nproc flock mktemp mv install; do
+        command -v "$executable" >/dev/null 2>&1 || die "missing prerequisite: $executable"
+    done
+    if (( ENABLE_T3_SWAP_RECYCLE )); then
+        for executable in timeout swapoff swapon findmnt; do
+            command -v "$executable" >/dev/null 2>&1 || die "T3 prerequisite missing: $executable"
+        done
+    fi
+}
+do_status() {
+    collect_metrics || die "cannot read valid memory/load metrics"
+    printf 'ztop-ramcleaner %s\n  %s\n  dry-run: %s   config: %s\n' "$RC_VERSION" "$(metrics_line)" "$DRY_RUN" "$CONFIG"
+    local spec path pct cap tier
+    for spec in "${RECLAIM_TARGETS[@]}"; do
+        IFS=: read -r path pct cap <<<"$spec"
+        if [ -e "$CGROUP_ROOT/$path/memory.reclaim" ]; then
+            printf '  reclaim %s: available\n' "$path"
+        else
+            printf '  reclaim %s: unavailable\n' "$path"
+        fi
+    done
+    if [ -e "$PROC_ROOT/sys/vm/compact_memory" ]; then printf '  compaction: available\n'; else printf '  compaction: unavailable\n'; fi
+    for tier in t1 t2 t3 pass recovery; do
+        printf '  %s outcome: %s; detail: %s; last success: %s\n' "$tier" "$(state_value "${tier}_outcome")" "$(state_value "${tier}_detail")" "$(state_value "${tier}_last")"
+    done
+    local recovery
+    recovery=$(state_value recovery_device)
+    if [ -n "$recovery" ]; then printf '  RECOVERY REQUIRED: %s (run --recover to retry)\n' "$recovery"; fi
+}
+do_once() {
+    check_prerequisites
+    if (( ! DRY_RUN )); then [ "$(id -u)" -eq 0 ] || die "active passes require root"; fi
+    [ ! -e "$DISABLE_FLAG" ] || { vlog "disabled by $DISABLE_FLAG"; return 0; }
+    # Preview writes only its log: it does not create a lock or update cooldowns.
+    if (( ! DRY_RUN )); then
+        acquire_active_lock || { vlog "another pass is running"; return 0; }
+        install -d -m 0755 "$STATE_DIR" || die "cannot create $STATE_DIR"
+        load_pending_recovery
+        if [ -n "$SWAP_RECOVERY_DEV" ]; then
+            recover_swap || { record_outcome pass failed "swap recovery required"; return 1; }
+        fi
+        renice -n 19 -p $$ >/dev/null 2>&1 || true
+        if command -v ionice >/dev/null 2>&1; then ionice -c3 -p $$ >/dev/null 2>&1 || true; fi
+    fi
+    collect_metrics || die "cannot read valid memory/load metrics"
+    log "PASS $(metrics_line) dry_run=$DRY_RUN" || die "cannot write log: $LOG"
+    local tier failed=0 acted=0
+    for tier in 1 2 3; do
+        if [ -n "$FORCE_TIER" ] && [ "$FORCE_TIER" != "$tier" ]; then continue; fi
+        if [ "$FORCE_TIER" = "$tier" ] || "tier${tier}_should_run"; then
+            acted=1
+            case "$tier" in
+                1) tier1_reclaim || failed=1 ;;
+                2) tier2_compact || failed=1 ;;
+                3) tier3_swap_recycle || failed=1 ;;
+            esac
+            record_outcome "t$tier" "$OUTCOME" "$(metrics_line)" || failed=1
+            collect_metrics || { failed=1; break; }
+        fi
+    done
+    if (( failed )); then
+        record_outcome pass failed "one or more actions failed or were partial" || true
+        return 1
+    fi
+    if (( acted )); then
+        record_outcome pass succeeded "enabled actions completed; inspect individual tier outcomes" || return 1
+    else
+        record_outcome pass skipped "no enabled tier triggered" || return 1
+    fi
+}
+
+main() {
+    # Help/version never source configuration or acquire locks.
+    case "${1:-}" in
+        --version) printf 'ztop-ramcleaner %s\n' "$RC_VERSION"; return ;;
+        -h|--help) sed -n '5,17p' "${BASH_SOURCE[0]}"; return ;;
+    esac
+    load_config
+    local mode_argument=0 recovery_requested=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --status) ACTION=status; mode_argument=1 ;;
+            --dry-run) DRY_RUN=1; mode_argument=1 ;;
+            --apply) DRY_RUN=0; mode_argument=1 ;;
+            --recover) recovery_requested=1 ;;
+            --verbose|-v) VERBOSE=1 ;;
+            --quiet|-q) VERBOSE=0 ;;
+            --force-tier) shift; FORCE_TIER="${1:-}"; [[ "$FORCE_TIER" =~ ^[1-3]$ ]] || die "--force-tier requires 1..3; T4 is unavailable" ;;
+            *) die "unknown argument: $1 (try --help)" ;;
+        esac
+        shift
+    done
+    if (( recovery_requested )); then
+        if (( mode_argument != 0 )) || [ -n "$FORCE_TIER" ]; then
+            die "--recover cannot be combined with --status, --dry-run, --apply, or --force-tier"
+        fi
+        [[ "$VERBOSE" =~ ^[01]$ ]] || die "VERBOSE must be 0 or 1"
+        DRY_RUN=0
+        do_recover
+        return
+    fi
+    validate_config
+    case "$ACTION" in status) do_status ;; once) do_once ;; esac
+}
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    trap recovery_on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    main "$@"
+fi
