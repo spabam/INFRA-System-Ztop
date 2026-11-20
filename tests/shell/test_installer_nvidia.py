@@ -137,7 +137,7 @@ command() {
         result = self.run_helpers(self.no_smi() + 'check_nvidia\nverify_ztop_gpu "$TARGET"',
                                   FIXTURE_DIAGNOSTIC="ztop: GPU init failed (NVML init: libnvidia-ml.so.1: cannot open shared object file)")
         self.assert_success(result)
-        self.assertIn("no NVIDIA runtime detected", result.stderr)
+        self.assertIn("no NVIDIA runtime detected", result.stdout)
         self.assertIn("libnvidia-ml.so.1: cannot open", result.stdout)
         self.assertNotIn("GPU init failed", result.stderr)
         self.assertIn("GPU monitoring unavailable", result.stdout)

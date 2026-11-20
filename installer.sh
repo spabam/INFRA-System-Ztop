@@ -604,15 +604,17 @@ check_nvidia() {
         NVIDIA_EXPECTED=1
         log "NVIDIA runtime/device files found; GPU access still needs verification with ztop"
     else
-        warn "no NVIDIA runtime detected; ztop can monitor CPU/RAM without GPU metrics"
+        log "no NVIDIA runtime detected; installing CPU/RAM monitoring"
     fi
 }
 
 verify_ztop_gpu() {
     local binary="$1" snapshot counts found fresh diagnostic
+    local gpu_option=--gpu
+    [ "$NVIDIA_EXPECTED" -eq 1 ] || gpu_option=--no-gpu
     # Ignore operator config so show_gpu=false cannot conceal a broken install.
     # Device telemetry needs no per-process accounting privileges.
-    if ! snapshot=$("$binary" --no-config --gpu --no-pid-gpu --no-temp --json --top 1 2>&1); then
+    if ! snapshot=$("$binary" --no-config "$gpu_option" --no-pid-gpu --no-temp --json --top 1 2>&1); then
         warn "$binary could not produce a verification snapshot: $snapshot"
         return 1
     fi
