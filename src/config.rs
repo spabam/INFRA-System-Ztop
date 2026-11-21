@@ -58,36 +58,27 @@ pub fn apply_default_file(cli: &mut Cli, matches: &ArgMatches) -> Result<()> {
 fn apply(cli: &mut Cli, matches: &ArgMatches, cfg: &FileConfig) -> Result<()> {
     let from_cli = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
 
-    if let Some(v) = cfg.refresh_interval {
+    if let Some(v) = cfg.refresh_interval.filter(|_| !from_cli("refresh")) {
         if !REFRESH_RANGE.contains(&v) {
             return Err(anyhow!("refresh_interval must be in 0.25..=5.0 (got {v})"));
         }
-        if !from_cli("refresh") {
-            cli.refresh = v;
-        }
+        cli.refresh = v;
     }
-    if let Some(s) = &cfg.sort_by {
-        let sort = <SortArg as clap::ValueEnum>::from_str(s, true)
+    if let Some(s) = cfg.sort_by.as_deref().filter(|_| !from_cli("sort")) {
+        cli.sort = <SortArg as clap::ValueEnum>::from_str(s, true)
             .map_err(|_| anyhow!("sort_by must be one of cpu|ram|gpu|vram|total (got {s:?})"))?;
-        if !from_cli("sort") {
-            cli.sort = sort;
-        }
     }
-    if let Some(v) = cfg.top_processes {
+    if let Some(v) = cfg.top_processes.filter(|_| !from_cli("top")) {
         if !TOP_RANGE.contains(&v) {
             return Err(anyhow!("top_processes must be in 1..=200 (got {v})"));
         }
-        if !from_cli("top") {
-            cli.top = v;
-        }
+        cli.top = v;
     }
-    if let Some(v) = cfg.gpu_peak_hold {
+    if let Some(v) = cfg.gpu_peak_hold.filter(|_| !from_cli("gpu_peak_hold")) {
         if !GPU_PEAK_HOLD_RANGE.contains(&v) {
             return Err(anyhow!("gpu_peak_hold must be in 0..=30 (got {v})"));
         }
-        if !from_cli("gpu_peak_hold") {
-            cli.gpu_peak_hold = v;
-        }
+        cli.gpu_peak_hold = v;
     }
     if let Some(filter) = &cfg.process_filter {
         if !from_cli("filter") {
@@ -117,7 +108,7 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches};
 
     use super::{apply, FileConfig};
-    use crate::cli::Cli;
+    use crate::cli::{Cli, SortArg};
 
     fn parse(args: &[&str]) -> (Cli, clap::ArgMatches) {
         let matches = Cli::command().get_matches_from(args);
@@ -186,6 +177,21 @@ mod tests {
 
         let cfg: FileConfig = toml::from_str("sort_by = \"bogus\"").unwrap();
         assert!(apply(&mut cli, &matches, &cfg).is_err());
+    }
+
+    #[test]
+    fn valid_explicit_options_override_invalid_file_values() {
+        let (mut cli, matches) = parse(&[
+            "ztop", "--refresh", "1", "--sort", "ram", "--top", "4", "--gpu-peak-hold", "3",
+        ]);
+        let cfg: FileConfig = toml::from_str(
+            "refresh_interval = 9.0\nsort_by = 'bogus'\ntop_processes = 0\ngpu_peak_hold = 31.0",
+        ).unwrap();
+        apply(&mut cli, &matches, &cfg).unwrap();
+        assert_eq!(cli.refresh, 1.0);
+        assert!(matches!(cli.sort, SortArg::Ram));
+        assert_eq!(cli.top, 4);
+        assert_eq!(cli.gpu_peak_hold, 3.0);
     }
 
     #[test]

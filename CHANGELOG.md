@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.11+20261121.0757] — 2026-11-21
+
+- Honor explicit CLI overrides before validating saved values.
+
 ## [0.9.10+20261120.0942] — 2026-11-20
 
 - Verify CPU-only monitoring without probing unavailable NVML; support root orchestrator staging.
