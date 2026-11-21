@@ -63,7 +63,10 @@ fn run<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut AppState,
     collector: &mut Collector,
-) -> Result<()> {
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut last_tick = Instant::now();
     collector.sample_gpu();
     let mut snapshot = collector.collect(app);

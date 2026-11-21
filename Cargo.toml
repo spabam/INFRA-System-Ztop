@@ -2,7 +2,7 @@
 name = "ztop"
 # Monotonically increasing SemVer; UTC build metadata identifies the build.
 # Update release versions with scripts/version.sh. See README §Versioning.
-version = "0.9.11+20261121.0757"
+version = "0.9.12+20261121.1113"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Andrea Bodei <info@andreabodei.com>"]
@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
-ratatui = "0.29"
+ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.38.1"

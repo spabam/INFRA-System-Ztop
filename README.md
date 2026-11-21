@@ -2,7 +2,7 @@
 
 `ZTOP` is a tool to monitor CPU, RAM, GPU, VRAM in the top/htop style and with modern compatibility to nvidia drivers (it works where btop fails). Written from scratch in Rust. `by Andrea Bodei info@andreabodei.com 2026`.
 
-**Status:** v0.9.11+20261121.0757 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
+**Status:** v0.9.12+20261121.1113 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
 
 A simple, clean, real-time Linux system monitor inspired by `btop`, focused on the essential metrics:
 

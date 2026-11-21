@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.12+20261121.1113] — 2026-11-21
+
+- Upgrade terminal and error-handling dependencies to address security advisories.
+
 ## [0.9.11+20261121.0757] — 2026-11-21
 
 - Honor explicit CLI overrides before validating saved values.
