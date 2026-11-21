@@ -160,6 +160,17 @@ ztop --refresh 1
 
 ## Install
 
+For a platform deployment, run `bash installer.sh --only ztop --dry-run` from
+the platform checkout root. Use `--apply` to build and install the monitor.
+When root runs this entry point it sends the pinned Rust sources to an
+unprivileged builder and publishes the verified executable to
+`${PREFIX:-/usr}/bin/ztop`. A root-owned checkout with no invoking user uses a
+temporary systemd build identity. The receiver needs the Rust dependencies
+available locally or reachable during the build. From a shell on the receiving
+machine, `ztop --version` reports the build and `ztop --no-config --no-gpu
+--json --top 1` prints one CPU/RAM sample with config-file settings disabled.
+The optional ramcleaner companion has its own installation command below.
+
 The bundled installer bootstraps any missing dependencies, builds in release mode, and copies the binary into `/usr/bin/ztop`:
 
 ```bash
