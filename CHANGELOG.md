@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.14+20261123.1731] — 2026-11-23
+
+### Added
+
+- A Disks panel between the GPU panels and the process table, where the
+  `Recent samples` strip used to be. It has one row per physical disk in the
+  shape of the RAM row, `nvme0n1    441 /  1740 GiB  25.4% [bar]`, and its
+  title counts the disks and adds up their raw capacity:
+  ` Disks · 1 physical · 1863 GiB `.
+- Each row adds up the filesystems mounted on that disk, as `df` reports
+  them, so a full filesystem reads 100 %. Filesystems are followed down to
+  their disk through partitions, LVM, LUKS, MD RAID and btrfs member lists;
+  one that spans several disks is divided between them by the space it
+  occupies on each. A disk with nothing mounted shows its size and
+  `no mounted filesystem`. ZFS pools are not attributed to their disks.
+- The panel lists at most four disks, the fullest ones when there are more,
+  and appears only while the process table keeps ten rows. 80x24 and compact
+  layouts are unchanged.
+- JSON snapshots carry a `disks` array (`name`, `size_bytes`, `filesystems`,
+  `fs_used_bytes`, `fs_total_bytes`). The field is additive; the schema
+  version stays 2.
+
+### Changed
+
+- RAM, swap, VRAM and disk rows share one renderer. Sizes from 1000 GiB up
+  are shown in whole GiB, and from 100000 GiB in TiB, so the bar that follows
+  starts in the same column on every row. Rows below 1000 GiB look as before.
+- `libc` is now a direct Linux dependency, for `statfs(2)`. It was already in
+  the dependency tree, at the same version.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  in debug and release (84 passed, 1 ignored) green. `cargo check` for
+  `x86_64-apple-darwin`, where the disk probe is a stub, is clean.
+- ShellCheck, the version checks, all 57 shell fixtures, and the five runtime
+  tests against the release build passed.
+- On a one-NVMe host with LUKS and LVM (root, `/boot`, the ESP and a swap
+  volume) the row matched the sum of `df` over the three mounted filesystems
+  to the byte, 441 of 1740 GiB, as root and as an unprivileged user, and the
+  title matched `lsblk`. The TUI was captured through a pseudo-terminal at
+  151x35, 80x40, 60x44, 40x46 and 80x24.
+- Disk sampling costs about 2 µs per refresh on that host. The layout scan
+  that runs every five seconds costs about 0.3 ms with 85 mounts.
+- Multi-disk, RAID, btrfs and unmounted-disk behaviour is covered by sysfs
+  fixture trees, not by hardware: the test host has one disk.
+
 ## [0.9.13+20261123.1607] — 2026-11-23
 
 ### Removed

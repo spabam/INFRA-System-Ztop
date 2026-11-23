@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::SortMode;
-use crate::metrics::{ProcRow, SNAPSHOT_SCHEMA_VERSION};
+use crate::metrics::{DiskSnapshot, ProcRow, SNAPSHOT_SCHEMA_VERSION};
 use ratatui::{backend::TestBackend, Terminal};
 use std::collections::HashMap;
 
@@ -202,8 +202,8 @@ fn rows_left_over_by_the_panels_go_to_the_process_table() {
     };
     // Header (1), CPU (4 + one core row), RAM/swap (4), and two five-row GPU
     // panels use 20 of the 48 rows; the footer takes two and the table frame
-    // and column header three. The other 23 are process rows: no panel sits
-    // between the GPUs and the table to claim them.
+    // and column header three. The other 23 are process rows: the fixture
+    // has no disks, so nothing sits between the GPUs and the table.
     let rendered = render(100, 48, &mut app, &snapshot(2, 8, 40));
     assert_eq!(app.process_viewport_rows, 23);
     let rows = rendered.lines().collect::<Vec<_>>();
@@ -216,6 +216,142 @@ fn rows_left_over_by_the_panels_go_to_the_process_table() {
     // Without a GPU the three-row placeholder is the only GPU panel.
     render(100, 48, &mut app, &snapshot(0, 8, 40));
     assert_eq!(app.process_viewport_rows, 30);
+}
+
+#[test]
+fn disk_panel_sits_between_the_gpu_panels_and_the_process_table() {
+    let mut snap = snapshot(1, 8, 40);
+    snap.disks = vec![
+        disk("nvme0n1", 2000, 3, 441, 1740),
+        disk("sda", 500, 1, 120, 465),
+    ];
+    let mut app = AppState {
+        top_n: 40,
+        ..AppState::default()
+    };
+    let rendered = render(100, 48, &mut app, &snap);
+    let rows = rendered.lines().collect::<Vec<_>>();
+    // Header, CPU, RAM/swap and one GPU panel fill rows 0 to 14.
+    assert!(
+        rows[15].starts_with("┌ Disks · 2 physical · 2500 GiB ─"),
+        "{rendered}"
+    );
+    assert!(
+        rows[16].starts_with("│nvme0n1    441 /  1740 GiB  25.3% ["),
+        "{rendered}"
+    );
+    assert!(
+        rows[17].starts_with("│sda      120.0 / 465.0 GiB  25.8% ["),
+        "{rendered}"
+    );
+    assert!(rows[18].starts_with('└'), "{rendered}");
+    assert!(rows[19].contains("Processes 1–24 / 40"), "{rendered}");
+    assert_eq!(app.process_viewport_rows, 24);
+    // Every usage bar starts in the same column, whatever its label.
+    let bars = [3, 7, 12, 13, 16, 17].map(|row| rows[row].chars().position(|c| c == '['));
+    assert_eq!(bars, [Some(35); 6], "{rendered}");
+}
+
+#[test]
+fn disks_with_nothing_mounted_show_their_size_without_a_bar() {
+    let mut snap = snapshot(0, 8, 2);
+    snap.disks = vec![disk("sda", 465, 1, 120, 450), disk("sdb", 3726, 0, 0, 0)];
+    let rendered = render(100, 40, &mut AppState::default(), &snap);
+    let row = rendered
+        .lines()
+        .find(|line| line.starts_with("│sdb "))
+        .unwrap();
+    assert!(
+        row.starts_with("│sdb       — /  3726 GiB  no mounted filesystem "),
+        "{rendered}"
+    );
+    assert!(!row.contains('['), "{rendered}");
+    assert!(rendered.contains("│sda   120.0 / 450.0 GiB  26.7%    ["));
+}
+
+#[test]
+fn the_fullest_disks_are_listed_when_rows_run_out() {
+    let mut snap = snapshot(1, 8, 2);
+    snap.disks = vec![
+        disk("sda", 1000, 1, 100, 1000),
+        disk("sdb", 1000, 1, 900, 1000),
+        disk("sdc", 1000, 0, 0, 0),
+        disk("sdd", 1000, 1, 500, 1000),
+        disk("sde", 1000, 2, 950, 1000),
+        disk("sdf", 1000, 1, 700, 1000),
+    ];
+    let mut app = AppState::default();
+    let listed = |rendered: &str| {
+        rendered
+            .lines()
+            .filter_map(|line| line.strip_prefix("│sd"))
+            .map(|line| line.chars().next().unwrap())
+            .collect::<String>()
+    };
+    // A tall terminal still lists four at most, in name order.
+    let rendered = render(100, 48, &mut app, &snap);
+    assert!(
+        rendered.contains(" Disks · 6 physical · 6000 GiB · 4 fullest shown "),
+        "{rendered}"
+    );
+    assert_eq!(listed(&rendered), "bdef", "{rendered}");
+    // Thirty rows leave one row for disks beside ten for the process table.
+    let rendered = render(100, 30, &mut app, &snap);
+    assert!(rendered.contains(" · 1 fullest shown "), "{rendered}");
+    assert_eq!(listed(&rendered), "e", "{rendered}");
+    assert_eq!(app.process_viewport_rows, 7);
+    // One row fewer and the process table keeps them all.
+    let rendered = render(100, 29, &mut app, &snap);
+    assert!(!rendered.contains("Disks"), "{rendered}");
+    assert_eq!(app.process_viewport_rows, 9);
+    // Compact and 80x24 layouts never had room for the panel.
+    assert!(!render(80, 24, &mut app, &snap).contains("Disks"));
+    assert!(!render(80, 12, &mut app, &snap).contains("Disks"));
+}
+
+#[test]
+fn capacities_stay_five_columns_wide_across_units() {
+    const GIB: u64 = 1 << 30;
+    let tenth = GIB / 10;
+    assert_eq!(
+        capacity_pair(Some(164 * tenth), 939 * tenth),
+        " 16.4 /  93.9 GiB"
+    );
+    assert_eq!(
+        capacity_pair(Some(441 * GIB), 1740 * GIB),
+        "  441 /  1740 GiB"
+    );
+    assert_eq!(capacity_pair(None, 3726 * GIB), "    — /  3726 GiB");
+    // The decimal goes exactly where it would need a sixth column.
+    assert_eq!(capacity_pair(Some(0), 9999 * tenth), "  0.0 / 999.9 GiB");
+    assert_eq!(
+        capacity_pair(Some(0), 99_996 * GIB / 100),
+        "    0 /  1000 GiB"
+    );
+    assert_eq!(
+        capacity_pair(Some(99_999 * GIB), 99_999 * GIB),
+        "99999 / 99999 GiB"
+    );
+    assert_eq!(
+        capacity_pair(Some(100_000 * GIB), 200_000 * GIB),
+        " 97.7 / 195.3 TiB"
+    );
+    assert_eq!(capacity(1863 * GIB), "1863 GiB");
+    assert_eq!(capacity(4658 * tenth), "465.8 GiB");
+}
+
+#[test]
+fn disk_panel_title_falls_back_to_the_bare_label_when_it_does_not_fit() {
+    let disks = [disk("sda", 500, 1, 1, 2), disk("sdb", 500, 1, 1, 2)];
+    assert_eq!(
+        disks_title(&disks, 2, 40),
+        " Disks · 2 physical · 1000 GiB "
+    );
+    assert_eq!(
+        disks_title(&disks, 1, 60),
+        " Disks · 2 physical · 1000 GiB · 1 fullest shown "
+    );
+    assert_eq!(disks_title(&disks, 1, 40), " Disks ");
 }
 
 #[test]
@@ -315,6 +451,7 @@ fn snapshot(gpu_count: usize, cores: usize, processes: usize) -> Snapshot {
                 per_pid: HashMap::new(),
             })
             .collect(),
+        disks: Vec::new(),
         procs: (0..processes)
             .map(|index| ProcRow {
                 pid: 100 + index as u32,
@@ -326,6 +463,25 @@ fn snapshot(gpu_count: usize, cores: usize, processes: usize) -> Snapshot {
                 command: format!("python worker-{index}"),
             })
             .collect(),
+    }
+}
+
+/// A disk of `size_gib` whose mounted filesystems hold `used_gib` of
+/// `total_gib`.
+fn disk(
+    name: &str,
+    size_gib: u64,
+    filesystems: u32,
+    used_gib: u64,
+    total_gib: u64,
+) -> DiskSnapshot {
+    const GIB: u64 = 1 << 30;
+    DiskSnapshot {
+        name: name.into(),
+        size_bytes: size_gib * GIB,
+        filesystems,
+        fs_used_bytes: used_gib * GIB,
+        fs_total_bytes: total_gib * GIB,
     }
 }
 

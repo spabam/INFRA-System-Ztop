@@ -38,6 +38,9 @@ one process row.
   devices are opened.
 - Run on a multi-GPU host; each GPU must have a panel and process VRAM must
   sum across devices.
+- Run on a multi-disk host; each physical disk must have a row whose numbers
+  match `df` for the filesystems on it, and a disk with nothing mounted must
+  show its size and `no mounted filesystem`.
 - Resize the terminal through 40, 50, 60, 70, 76, 80, 100, and wide widths.
 - Measure idle CPU at the default 1 s refresh and record host CPU count,
   process count, GPU count, and observed CPU cost.

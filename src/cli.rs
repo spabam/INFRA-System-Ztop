@@ -5,8 +5,8 @@ use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 const LONG_ABOUT: &str = "\
-A real-time terminal dashboard for CPU, RAM, swap, GPU, VRAM, and the top
-resource-consuming processes. Designed for Linux workstations, GPU servers,
+A real-time terminal dashboard for CPU, RAM, swap, GPU, VRAM, disks, and the
+top resource-consuming processes. Designed for Linux workstations, GPU servers,
 AI research machines, and developers who need a focused, fast monitor.
 
 Features:
@@ -20,6 +20,8 @@ Features:
     open /dev/nvidia-uvm for device telemetry. Use --no-gpu to skip NVML entirely
   - Multi-GPU: every NVIDIA device gets its own panel; per-process VRAM is
     summed across devices
+  - Disks: one row per physical disk with the used/total/percentage of the
+    filesystems mounted on it, through partitions, LVM, LUKS and MD RAID
   - 1-second refresh by default, configurable 0.25-5.0s
   - Top-N process table, configurable 1-200 rows (also adjustable live with [ and ])
   - --json prints one metrics snapshot; --json-stream emits newline-delimited JSON
@@ -35,6 +37,9 @@ JSON output:
   device and observation; unavailable utilization and temperature are null.
   cpu_physical_cores is the physical core count (null when the host hides it);
   the thread count is the length of cpu_per_core_pct.
+  disks lists each physical disk: name, size_bytes (the raw device), the
+  number of mounted filesystems measured on it, and its share of their
+  fs_used_bytes and fs_total_bytes.
 
 Configuration file (optional):
   ~/.config/ztop/config.toml is read at startup ($XDG_CONFIG_HOME honored).
@@ -43,7 +48,7 @@ Configuration file (optional):
   always win. Use --config PATH or --no-config to control config loading.
 
 Color palette:
-  Cyan       section labels (CPU, RAM, SWAP, GPU, VRAM, temp, refresh:, host:, ...)
+  Cyan       section labels (CPU, RAM, SWAP, GPU, VRAM, disk names, temp, ...)
   Grey       CPU and GPU brand strings
   Yellow     temperature readings
   Green      bar fill when usage < 50%

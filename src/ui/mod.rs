@@ -4,6 +4,8 @@
 mod bars;
 mod table;
 
+use std::borrow::Cow;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -16,13 +18,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{process_matches, AppState},
-    metrics::{GpuSampleStatus, GpuSnapshot, Snapshot},
+    metrics::{DiskSnapshot, GpuSampleStatus, GpuSnapshot, Snapshot},
 };
 
 const CORE_LABEL_WIDTH: usize = 6;
 const MIN_CORE_INDEX_WIDTH: usize = 2;
 const CORE_USAGE_WIDTH: usize = 4;
 const BAR_START_COL: usize = 34;
+/// The disk panel lists at most this many disks, however tall the terminal.
+const MAX_DISK_ROWS: usize = 4;
 const LABEL: Style = Style::new().fg(Color::Cyan);
 const BRAND: Style = Style::new().fg(Color::Gray);
 const TEMP: Style = Style::new().fg(Color::Yellow);
@@ -34,6 +38,7 @@ struct PanelLayout {
     memory: Rect,
     gpus: Vec<(usize, Rect)>,
     gpu_none: Option<Rect>,
+    disks: Option<Rect>,
     table: Rect,
     footer: Rect,
     compact: bool,
@@ -53,23 +58,37 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
     let compact = area.height < 22;
     let n_gpus = snap.gpus.len().max(1);
     let mut core_rows = 0;
+    let mut disk_rows = 0;
     let (gpu_count, gpu_height) = if compact {
         (1, 1)
     } else {
         // Header + footer use three rows. Always reserve eight for processes.
         let budget = area.height.saturating_sub(3 + 8 + 4 + 4);
         // Per-core rows are mandatory: no key hides them, and they take the
-        // flexible space first, ahead of GPU panel height and extra GPU
-        // panels. Only one three-row GPU panel is kept ahead of them, so they
-        // are trimmed solely when the terminal cannot hold them next to the
-        // eight process rows at all. Rows the panels leave over go to the
-        // process table.
+        // flexible space first, ahead of GPU panel height, extra GPU panels,
+        // and the disk panel. Only one three-row GPU panel is kept ahead of
+        // them, so they are trimmed solely when the terminal cannot hold them
+        // next to the eight process rows at all.
         let n_cores = snap.cpu_per_core_pct.len().max(1);
         let desired = n_cores.div_ceil(cores_per_row(area.width, n_cores));
         core_rows = desired.min(usize::from(budget.saturating_sub(3)));
         let gpu_budget = budget.saturating_sub(core_rows as u16);
         let count = usize::from(gpu_budget / 3).max(1).min(n_gpus);
         let height = if gpu_budget >= count as u16 * 5 { 5 } else { 3 };
+        // The disk panel comes last: a frame around one row per physical
+        // disk, and only while the process table keeps two rows more than
+        // its minimum. Rows left after that go to the process table.
+        let gpu_rows = if snap.gpus.is_empty() {
+            3
+        } else {
+            count as u16 * height
+        };
+        let spare = usize::from(gpu_budget.saturating_sub(gpu_rows));
+        disk_rows = snap
+            .disks
+            .len()
+            .min(MAX_DISK_ROWS)
+            .min(spare.saturating_sub(4));
         (count, height)
     };
     let gpu_pages = n_gpus.div_ceil(gpu_count);
@@ -90,6 +109,7 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
             gpus.push((index, take_rows(&mut remaining, gpu_height)));
         }
     }
+    let disks = (disk_rows > 0).then(|| take_rows(&mut remaining, disk_rows as u16 + 2));
     let table_height = remaining.height.saturating_sub(2);
     let table = take_rows(&mut remaining, table_height);
     let footer = remaining;
@@ -99,6 +119,7 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
         memory,
         gpus,
         gpu_none,
+        disks,
         table,
         footer,
         compact,
@@ -150,6 +171,9 @@ pub fn draw(f: &mut Frame, app: &AppState, snap: &Snapshot) {
     }
     for &(index, area) in &layout.gpus {
         draw_gpu(f, area, &snap.gpus[index], snap, layout.gpu_pages);
+    }
+    if let Some(area) = layout.disks {
+        draw_disks(f, area, &snap.disks);
     }
     table::draw(f, layout.table, snap, app);
     draw_footer(f, layout.footer, app);
@@ -295,12 +319,48 @@ fn draw_compact_memory(f: &mut Frame, area: Rect, snap: &Snapshot) {
     );
 }
 
-fn memory_line(label: &'static str, used: u64, total: u64, area: Rect) -> Line<'static> {
+/// `LABEL   16.4 /  93.9 GiB  17.5%  [████░░░░]`: the row shared by RAM, swap,
+/// VRAM and each disk.
+fn usage_line(
+    label: impl Into<Cow<'static, str>>,
+    used: u64,
+    total: u64,
+    area: Rect,
+) -> Line<'static> {
+    let label = label.into();
     let pct = used as f64 / total.max(1) as f64 * 100.0;
-    let text = format!("  {:5.1} / {:5.1} GiB {pct:5.1}%", gib(used), gib(total));
-    let mut spans = vec![Span::styled(label, LABEL), Span::raw(text.clone())];
-    append_aligned_bar(&mut spans, label.width() + text.width(), pct as f32, area);
+    let text = format!("  {} {pct:5.1}%", capacity_pair(Some(used), total));
+    let prefix_width = label.width() + text.width();
+    let mut spans = vec![Span::styled(label, LABEL), Span::raw(text)];
+    append_aligned_bar(&mut spans, prefix_width, pct as f32, area);
     Line::from(spans)
+}
+
+/// The unit a capacity is shown in, the bytes in one of it, and the decimals
+/// that keep the number within five columns: one decimal below 1000 GiB,
+/// whole GiB below 100000 GiB, TiB beyond that.
+fn capacity_unit(bytes: u64) -> (&'static str, f64, usize) {
+    const GIB: f64 = 1_073_741_824.0;
+    match bytes as f64 / GIB {
+        gib if gib < 999.95 => ("GiB", GIB, 1),
+        gib if gib < 99_999.5 => ("GiB", GIB, 0),
+        _ => ("TiB", GIB * 1024.0, 1),
+    }
+}
+
+/// `used / total` in the unit of `total`, both numbers five columns wide so
+/// that what follows starts in the same column on every row. `used` is `None`
+/// where nothing was measured.
+fn capacity_pair(used: Option<u64>, total: u64) -> String {
+    let (unit, unit_bytes, decimals) = capacity_unit(total);
+    let number = |bytes: u64| format!("{:5.decimals$}", bytes as f64 / unit_bytes);
+    let used = used.map_or_else(|| format!("{:>5}", "—"), number);
+    format!("{used} / {} {unit}", number(total))
+}
+
+fn capacity(bytes: u64) -> String {
+    let (unit, unit_bytes, decimals) = capacity_unit(bytes);
+    format!("{:.decimals$} {unit}", bytes as f64 / unit_bytes)
 }
 
 fn draw_memory(f: &mut Frame, area: Rect, snap: &Snapshot) {
@@ -310,11 +370,11 @@ fn draw_memory(f: &mut Frame, area: Rect, snap: &Snapshot) {
             Span::raw("  none configured"),
         ])
     } else {
-        memory_line("SWAP", snap.swap_used_bytes, snap.swap_total_bytes, area)
+        usage_line("SWAP", snap.swap_used_bytes, snap.swap_total_bytes, area)
     };
     f.render_widget(
         Paragraph::new(vec![
-            memory_line("RAM ", snap.ram_used_bytes, snap.ram_total_bytes, area),
+            usage_line("RAM ", snap.ram_used_bytes, snap.ram_total_bytes, area),
             swap,
         ])
         .block(Block::default().borders(Borders::ALL)),
@@ -416,7 +476,7 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &GpuSnapshot, snap: &Snapshot, pages: 
         }
     }
     let memory = if available {
-        memory_line("VRAM", g.vram_used_bytes, g.vram_total_bytes, area)
+        usage_line("VRAM", g.vram_used_bytes, g.vram_total_bytes, area)
     } else {
         Line::from(vec![Span::styled("VRAM", LABEL), Span::raw(" n/a")])
     };
@@ -436,6 +496,77 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &GpuSnapshot, snap: &Snapshot, pages: 
             memory,
         ])
         .block(block),
+        area,
+    );
+}
+
+/// The disks to list in `rows` rows: all of them when they fit, otherwise the
+/// fullest ones, still in device-name order. Disks with nothing mounted give
+/// way first.
+fn fullest_disks(disks: &[DiskSnapshot], rows: usize) -> Vec<&DiskSnapshot> {
+    let mut picked: Vec<usize> = (0..disks.len()).collect();
+    if picked.len() > rows {
+        let fullness = |disk: &DiskSnapshot| match disk.filesystems {
+            0 => -1.0,
+            _ => disk.fs_used_bytes as f64 / disk.fs_total_bytes.max(1) as f64,
+        };
+        // The sort is stable: equally full disks keep their name order.
+        picked.sort_by(|&a, &b| fullness(&disks[b]).total_cmp(&fullness(&disks[a])));
+        picked.truncate(rows);
+        picked.sort_unstable();
+    }
+    picked.into_iter().map(|index| &disks[index]).collect()
+}
+
+/// Disk panel title: the hardware, ` Disks · 2 physical · 2794 GiB `, with a
+/// note when not every disk is listed. Falls back to the bare ` Disks ` when
+/// that does not fit.
+fn disks_title(disks: &[DiskSnapshot], shown: usize, max_width: usize) -> String {
+    let size = disks.iter().map(|disk| disk.size_bytes).sum();
+    let mut title = format!(" Disks · {} physical · {}", disks.len(), capacity(size));
+    if shown < disks.len() {
+        title.push_str(&format!(" · {shown} fullest shown"));
+    }
+    title.push(' ');
+    if title.width() <= max_width {
+        title
+    } else {
+        " Disks ".to_string()
+    }
+}
+
+/// One row per physical disk: how full the filesystems mounted on it are.
+fn draw_disks(f: &mut Frame, area: Rect, disks: &[DiskSnapshot]) {
+    let shown = fullest_disks(disks, usize::from(area.height.saturating_sub(2)));
+    let label_width = shown
+        .iter()
+        .map(|disk| disk.name.width())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let lines = shown
+        .iter()
+        .map(|disk| {
+            let label = format!("{:<label_width$}", disk.name);
+            if disk.filesystems == 0 {
+                // No usage to show, only how large the device is.
+                let size = capacity_pair(None, disk.size_bytes);
+                Line::from(vec![
+                    Span::styled(label, LABEL),
+                    Span::raw(format!("  {size}  no mounted filesystem")),
+                ])
+            } else {
+                usage_line(label, disk.fs_used_bytes, disk.fs_total_bytes, area)
+            }
+        })
+        .collect::<Vec<_>>();
+    let title = disks_title(disks, shown.len(), area.width.saturating_sub(2) as usize);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, TITLE)),
+        ),
         area,
     );
 }

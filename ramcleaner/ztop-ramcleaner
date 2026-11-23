@@ -17,7 +17,7 @@
 # Suspend scheduled passes: sudo touch /run/ztop-ramcleaner.disable
 set -uo pipefail
 
-RC_VERSION="0.9.13+20261123.1607"
+RC_VERSION="0.9.14+20261123.1731"
 CONFIG="${ZTOP_RC_CONFIG:-/etc/ztop/ramcleaner.conf}"
 STATE_DIR="${ZTOP_RC_STATE_DIR:-/var/lib/ztop-ramcleaner}"
 LOG="${ZTOP_RC_LOG:-/var/log/ztop-ramcleaner.log}"

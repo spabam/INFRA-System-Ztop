@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 mod cpu;
+mod disk;
 mod gpu;
 mod memory;
 mod process;
@@ -18,6 +19,7 @@ use sysinfo::{System, Users};
 use crate::app::{AppState, SortMode};
 use crate::cli::Cli;
 
+pub use disk::DiskSnapshot;
 pub use gpu::{GpuSampleStatus, GpuSnapshot, PerPidGpu};
 pub use process::ProcRow;
 
@@ -45,6 +47,8 @@ pub struct Snapshot {
     pub swap_used_bytes: u64,
     pub swap_total_bytes: u64,
     pub gpus: Vec<GpuSnapshot>,
+    /// Physical disks in device-name order; empty where none can be found.
+    pub disks: Vec<DiskSnapshot>,
     pub procs: Vec<ProcRow>,
 }
 
@@ -94,6 +98,7 @@ pub struct Collector {
     gpu_sample_interval: Duration,
     last_gpu_sample: Option<Instant>,
     temp: Option<temp::CpuTempReader>,
+    disks: disk::Probe,
     /// Physical core count, read once at startup because sysinfo re-parses
     /// `/proc/cpuinfo` on every query.
     cpu_physical_cores: Option<usize>,
@@ -133,6 +138,7 @@ impl Collector {
             gpu_sample_interval: Duration::from_millis(250),
             last_gpu_sample: None,
             temp: (!cli.no_temp).then(temp::CpuTempReader::new),
+            disks: disk::Probe::default(),
             cpu_physical_cores: cpu::physical_count(),
             cmd_cache: HashMap::new(),
         })
@@ -251,6 +257,7 @@ impl Collector {
             swap_used_bytes,
             swap_total_bytes,
             gpus,
+            disks: self.disks.sample(),
             procs,
         }
     }
@@ -348,8 +355,8 @@ impl GpuPeakHistory {
 #[cfg(test)]
 mod tests {
     use super::{
-        combined_per_pid, Collector, GpuPeakHistory, GpuSampleStatus, GpuSnapshot, PerPidGpu,
-        Snapshot, GPU_FAIL_GRACE_SAMPLES, SNAPSHOT_SCHEMA_VERSION,
+        combined_per_pid, Collector, DiskSnapshot, GpuPeakHistory, GpuSampleStatus, GpuSnapshot,
+        PerPidGpu, Snapshot, GPU_FAIL_GRACE_SAMPLES, SNAPSHOT_SCHEMA_VERSION,
     };
     use std::{
         collections::{HashMap, VecDeque},
@@ -400,6 +407,7 @@ mod tests {
             gpu_sample_interval: Duration::from_millis(250),
             last_gpu_sample: None,
             temp: None,
+            disks: super::disk::Probe::default(),
             cpu_physical_cores: None,
             cmd_cache: HashMap::new(),
         }
@@ -652,6 +660,13 @@ mod tests {
             swap_used_bytes: 0,
             swap_total_bytes: 0,
             gpus: vec![gpu],
+            disks: vec![DiskSnapshot {
+                name: "nvme0n1".into(),
+                size_bytes: 2_000,
+                filesystems: 3,
+                fs_used_bytes: 400,
+                fs_total_bytes: 1_800,
+            }],
             procs: Vec::new(),
         };
 
@@ -666,6 +681,16 @@ mod tests {
         assert!(json["gpus"][0]["util_pct"].is_null());
         assert!(json["gpus"][0]["temp_c"].is_null());
         assert!(json["gpus"][0].get("per_pid").is_none());
+        assert_eq!(
+            json["disks"][0],
+            serde_json::json!({
+                "name": "nvme0n1",
+                "size_bytes": 2_000,
+                "filesystems": 3,
+                "fs_used_bytes": 400,
+                "fs_total_bytes": 1_800,
+            })
+        );
     }
 
     fn gpu_snapshot(util_pct: u32, vram_used_bytes: u64) -> GpuSnapshot {

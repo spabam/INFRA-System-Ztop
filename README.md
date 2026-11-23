@@ -1,8 +1,8 @@
 # ZTOP
 
-`ZTOP` is a tool to monitor CPU, RAM, GPU, VRAM in the top/htop style and with modern compatibility to nvidia drivers (it works where btop fails). Written from scratch in Rust. `by Andrea Bodei info@andreabodei.com 2026`.
+`ZTOP` is a tool to monitor CPU, RAM, GPU, VRAM and disks in the top/htop style and with modern compatibility to nvidia drivers (it works where btop fails). Written from scratch in Rust. `by Andrea Bodei info@andreabodei.com 2026`.
 
-**Status:** v0.9.13+20261123.1607 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
+**Status:** v0.9.14+20261123.1731 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
 
 A simple, clean, real-time Linux system monitor inspired by `btop`, focused on the essential metrics:
 
@@ -13,6 +13,7 @@ A simple, clean, real-time Linux system monitor inspired by `btop`, focused on t
 - Swap usage
 - GPU model, usage and temperature
 - VRAM usage
+- Disk capacity and usage, per physical disk
 - Top 10 most resource-consuming commands
 - User running each command
 
@@ -29,7 +30,7 @@ Unlike general-purpose monitors, ZTOP treats GPU and VRAM usage as first-class m
 The objective is not to replace `btop`, `htop`, or `nvtop`, but to provide a simpler tool focused on:
 
 ```text
-CPU + RAM + GPU + VRAM + temperature + top consuming commands
+CPU + RAM + GPU + VRAM + disks + temperature + top consuming commands
 ```
 
 ---
@@ -53,6 +54,9 @@ Conceptual layout (the actual render adds horizontal bars and a footer with live
 │ NVIDIA GeForce RTX 4070 Laptop GPU                              │
 │ GPU      73%   Temp: 71°C                                       │
 │ VRAM     9.2 / 12.0 GB     76%                                  │
+├ Disks · 2 physical · 2794 GiB ──────────────────────────────────┤
+│ nvme0n1  441 / 1740 GiB    25%                                  │
+│ sda      612.4 / 916.8 GiB 67%                                  │
 ├──────────────────── Top 10 Consuming Commands ──────────────────┤
 │ PID     USER       CPU%   RAM%   GPU%   VRAM%    COMMAND        │
 │ 8123    giaime     188    12.1   65     65.0     python train.py │
@@ -65,7 +69,7 @@ The header shows the running version right next to the `ZTOP` title (e.g. `ZTOP 
 
 The CPU panel title carries the physical core and logical CPU (thread) counts, e.g. ` CPU · 12 cores / 14 threads `, directly above the CPU model line. On platforms that hide the physical topology (some containers and virtual machines) only the thread count is shown. The title carries no key hints: press `C` to hide or show the per-core rows, as listed in the `?` help overlay. The compact short-terminal summary carries the same counts.
 
-The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. Rows the panels leave over go to the process table.
+The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. A Disks panel follows the GPU panels when the terminal is tall enough for it and at least ten process-table rows (about 30 rows on a typical host); it lists up to four physical disks. Rows the panels leave over go to the process table.
 
 Per-core layout automatically uses the available terminal width, so wide terminals pack more cores per row and high-core-count servers need fewer CPU-panel rows. The process table drops columns as the terminal narrows (VRAM below 76 cols, GPU% below 70, USER below 60).
 
@@ -75,7 +79,7 @@ The live UI uses a small palette so the eye can separate labels from values at a
 
 | Style              | Meaning                                                |
 | ------------------ | ------------------------------------------------------ |
-| **Cyan**           | Section labels (`CPU`, `RAM`, `SWAP`, `GPU`, `VRAM`, `temp`, `Cores`), header field names (`refresh:`, `host:`, `uptime:`), footer keybinds, process-table column headers |
+| **Cyan**           | Section labels (`CPU`, `RAM`, `SWAP`, `GPU`, `VRAM`, `temp`, `Cores`, disk names), header field names (`refresh:`, `host:`, `uptime:`), footer keybinds, process-table column headers |
 | **Grey**           | Brand strings — CPU model on the first line of the CPU panel, GPU model on the first line of the GPU panel |
 | **Yellow**         | Temperature readings                                    |
 | **Green / yellow / red** | Bar fill, load-graded: green < 50 %, yellow 50–80 %, red ≥ 80 % |
@@ -100,6 +104,26 @@ The scheme works on any 256-color or truecolor terminal; on a strictly 16-color 
 - Swap percentage usage
 - System uptime
 - Hostname
+
+### Disks
+
+The Disks panel has one row per **physical disk**, in the same shape as the RAM row:
+
+```text
+┌ Disks · 2 physical · 2794 GiB ───────────────────────────────────────────────┐
+│nvme0n1    441 /  1740 GiB  25.4% [███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]│
+│sda      612.4 / 916.8 GiB  66.8% [████████████████████████████░░░░░░░░░░░░░░]│
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- The title counts the physical disks and adds up their raw capacity, as `lsblk` reports it.
+- Each row shows the used space and capacity of the **filesystems mounted on that disk**, as `df` reports them, added together. A full filesystem therefore reads 100 %. The capacity is smaller than the raw disk: swap, unmounted partitions and filesystem overhead are not filesystem space.
+- Filesystems are followed down to the disk through partitions, LVM, LUKS and MD RAID. A filesystem that spans several disks is divided between them in proportion to the space it occupies on each, so the rows add up to what `df` reports.
+- A disk with nothing mounted shows its size and `no mounted filesystem`.
+- Loop devices, zram, optical drives, network filesystems and overlays are not disks and are not counted. ZFS pools are not attributed to their disks; their member disks show `no mounted filesystem`.
+- When there are more disks than rows, the fullest ones are listed and the title says so.
+
+Capacities are in GiB with one decimal below 1000 GiB, whole GiB above that, and TiB from 100000 GiB, so every bar starts in the same column.
 
 ### GPU Metrics
 
@@ -425,6 +449,9 @@ CPU/RAM/GPU fields ending in `_pct` are percentages, temperatures are Celsius,
 and `sampled_at_unix_ms` is a UTC Unix timestamp in milliseconds.
 `cpu_physical_cores` is the physical core count, or `null` when the platform
 hides it; the thread (logical CPU) count is the length of `cpu_per_core_pct`.
+`disks` lists every physical disk with its `name`, raw `size_bytes`, the number
+of mounted `filesystems` measured on it, and its share of their `fs_used_bytes`
+and `fs_total_bytes` (both zero when nothing on the disk is mounted).
 Per-PID GPU maps are internal and are intentionally omitted from JSON. Backward-incompatible
 JSON changes will bump `schema_version`. GPU records include a stable `id` and NVML `index`, a `status` (`fresh`, `stale`, or `unavailable`), and the time of their last observation. GPU utilization and temperature are `null` when unavailable; memory fields on stale/unavailable devices describe the last observation.
 
@@ -562,6 +589,16 @@ ZTOP reads from sysfs directly — no `libsensors` dependency:
 1. Primary: walk `/sys/class/hwmon/*` and prefer entries named `coretemp` (Intel), `k10temp` or `zenpower` (AMD). Pick the input whose label is `Package id 0` or `Tctl`.
 2. Fallback: `/sys/class/thermal/thermal_zone*`, preferring zones of type `x86_pkg_temp`.
 
+### Disks
+
+ZTOP reads the kernel directly, with no `lsblk` or `df` at run time:
+
+1. `/sys/block` names the disks. A physical disk is a whole device that belongs to hardware (it has a `device` link) and holds media; loop, zram, device-mapper and MD devices, optical drives and eMMC boot areas are left out.
+2. `/proc/self/mountinfo` names the mounted filesystems. Each one's block device is followed through sysfs to the disks under it: a partition belongs to its parent disk, and device-mapper and MD devices list what they are built on in `slaves`. btrfs is resolved through its mount source and `/sys/fs/btrfs`.
+3. `statfs(2)` on one mount point per filesystem gives its capacity and used space.
+
+The disk and mount layout is rescanned every five seconds; usage is read on every refresh.
+
 ### NVIDIA GPU
 
 Use NVIDIA Management Library:
@@ -633,7 +670,8 @@ selects an explicit file and reports an error if it cannot be read.
 
 Implemented since the MVP: multi-GPU support, JSON output / headless snapshot
 mode (`--json`), the configuration file, quiet-by-default GPU diagnostics with
-`--verbose` detail mode, and rendering/JSON/collector regression tests.
+`--verbose` detail mode, the per-disk usage panel, and rendering/JSON/collector
+regression tests.
 
 Possible features for later versions:
 
@@ -739,9 +777,9 @@ publishing. Ordinary development edits do not require a new release number.
 ## Project Status
 
 The current development version is listed in **Status** above and reported by
-`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, process filtering
-and scrolling, config overrides, one-shot JSON, and JSON streaming are
-implemented. The memory-management companion is separately enabled
+`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, per-disk usage,
+process filtering and scrolling, config overrides, one-shot JSON, and JSON
+streaming are implemented. The memory-management companion is separately enabled
 and defaults to preview mode. See [`RELEASE.md`](./RELEASE.md) for remaining
 hardware qualification before a public release.
 

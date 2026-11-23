@@ -2,7 +2,7 @@
 name = "ztop"
 # Monotonically increasing SemVer; UTC build metadata identifies the build.
 # Update release versions with scripts/version.sh. See README §Versioning.
-version = "0.9.13+20261123.1607"
+version = "0.9.14+20261123.1731"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Andrea Bodei <info@andreabodei.com>"]
@@ -24,6 +24,8 @@ unicode-segmentation = "1"
 # NVML is Linux-only and optional at runtime — if the library fails to load,
 # we degrade gracefully. The Rust dep itself is always compiled in on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
+# statfs(2) for the disk panel; already in the tree through sysinfo and crossterm.
+libc = "0.2"
 nvml-wrapper = "0.10"
 nvml-wrapper-sys = "0.8"
 

@@ -7,8 +7,8 @@ stay true as the code evolves.
 
 The historical v0.1 MVP is complete. The current implementation includes
 multi-GPU panels, config-file defaults, headless JSON output, live help, live
-row-count adjustment, GPU peak hold, process search and scrolling, JSON
-streaming, and monotonically increasing release versions.
+row-count adjustment, GPU peak hold, process search and scrolling, a per-disk
+usage panel, JSON streaming, and monotonically increasing release versions.
 
 ---
 
@@ -21,6 +21,8 @@ ZTOP is a compact Linux terminal monitor focused on:
 - RAM and swap used / total / percentage
 - NVIDIA GPU name, utilization, temperature, VRAM used / total / percentage
 - Multi-GPU display, one panel per NVIDIA device
+- Physical disks: raw capacity, and used / total / percentage of the
+  filesystems mounted on each
 - Per-process PID, user, CPU%, RAM%, GPU%, VRAM%, and command
 - Top-N process sorting by CPU, RAM, GPU, VRAM, or normalized total score
 - TUI mode with keyboard control and width-responsive layout
@@ -141,6 +143,48 @@ Order of attempts:
 
 No `libsensors` dependency is allowed in the current design.
 
+### 3.3 Disks
+
+Disk data comes from the kernel only; no `lsblk`, `df`, or udev at run time.
+
+**Physical disks** are the entries of `/sys/block` that have a `device` link
+(hardware-backed; loop, zram, device-mapper, and MD devices have none) and a
+non-zero `size`. Optical drives (`sr*`), eMMC boot and RPMB areas, and hidden
+NVMe multipath paths are excluded. Disks are ordered by name with digit runs
+compared as numbers (`nvme2n1` before `nvme10n1`).
+
+**Filesystems** come from `/proc/self/mountinfo`. Only filesystems on local
+block devices count:
+
+1. A non-zero `major:minor` is the filesystem's block device; its kernel name
+   is the target of `/sys/dev/block/<major>:<minor>`.
+2. btrfs numbers itself (major 0): its mount source is resolved to one member
+   device, and `/sys/fs/btrfs/<fsid>/devices/` lists the others.
+3. Everything else with major 0 is skipped: ZFS, network and FUSE filesystems,
+   overlay, tmpfs. ZFS pools are therefore not attributed to their disks.
+
+**Attribution** walks sysfs from the block device to the disks under it: a
+partition belongs to its parent device, and a device with entries in `slaves`
+(LVM, LUKS, MD RAID) rests on those, to at most eight levels. Devices that end
+on no physical disk (loop images, zram) are not counted. A filesystem on
+several disks is divided between them in proportion to the size of the
+partition or device it occupies on each; this holds for every RAID level, so
+per-disk numbers are shares that add up to the filesystem's totals rather than
+physical occupancy.
+
+**Usage** is `statfs(2)` on one mount point per filesystem, however often it
+is mounted: capacity `f_blocks * f_frsize` and used
+`(f_blocks - f_bfree) * f_frsize`, the Size and Used columns of `df`. Blocks
+reserved for root count as free. A mount point is used only if `stat(2)` still
+reports the filesystem's device number there (not checked for btrfs, whose
+subvolumes have numbers of their own); otherwise the next mount point of the
+same filesystem is tried. A disk with no measurable filesystem reports
+`filesystems = 0` and zero usage.
+
+The disk and mount layout is rescanned at most every 5 seconds, because
+reading the mount table costs time in proportion to the number of mounts.
+Usage is read on every collection.
+
 ---
 
 ## 4. Sorting
@@ -251,6 +295,7 @@ Top-level fields:
 | `ram_*_bytes`        | integer     | Bytes                                   |
 | `swap_*_bytes`       | integer     | Bytes                                   |
 | `gpus`               | array       | Device snapshots                        |
+| `disks`              | array       | Physical disks, in name order           |
 | `procs`              | array       | Top process rows                        |
 
 GPU snapshots contain `id`, `index`, `name`, `sampled_at_unix_ms`, `status`, `util_pct`,
@@ -263,6 +308,13 @@ The device timestamp identifies that observation. Per-PID GPU maps remain intern
 Schema 2 changes utilization and temperature to nullable fields; schema 1 clients
 must update their readers before consuming these outputs. `cpu_physical_cores`
 was added in 0.9.6 as an additive nullable field without a schema bump.
+
+Disk records contain `name` (kernel device name), `size_bytes` (raw device
+capacity), `filesystems` (mounted filesystems measured on the disk), and
+`fs_used_bytes` / `fs_total_bytes` (the disk's share of their used space and
+capacity, section 3.3). The last two are `0` when `filesystems` is `0`. The
+array is empty where no physical disk can be found. `disks` was added in
+0.9.14 as an additive field without a schema bump.
 
 Process rows contain `pid`, `user`, `cpu_pct`, `ram_pct`, `gpu_pct`,
 `vram_bytes`, and `command`.
@@ -334,8 +386,27 @@ filter, top-N, process-list, or terminal-size changes. Numeric columns expand fo
 long PIDs and large CPU values; truncation respects grapheme/display width.
 Memory units shown in the TUI are GiB/MiB (powers of 1024).
 
-Rows left over by the header, CPU, memory, and GPU panels go to the process
-table; nothing is drawn between the GPU panels and the table. The TUI keeps no
+RAM, swap, VRAM, and disk rows share one shape,
+`LABEL  used / total UNIT  pct%  [bar]`, and their bars start in the same
+column. Both numbers are five columns wide: one decimal below 1000 GiB, whole
+GiB below 100000 GiB, and TiB with one decimal beyond.
+
+The Disks panel sits between the GPU panels and the process table. It has one
+row per physical disk, labelled with the device name, showing the used space
+and capacity of the filesystems mounted on it (section 3.3). A disk with
+`filesystems = 0` shows `— / <device size>` and `no mounted filesystem`
+instead of a percentage and bar. The title is
+` Disks · <n> physical · <total raw capacity> `, falling back to ` Disks `
+when it does not fit.
+
+The panel ranks last among the panels: after per-core rows, GPU panel count,
+and GPU panel height. It lists at most four disks and appears only while the
+process table keeps ten rows, two more than its minimum; compact layouts
+never show it. When there are more disks than rows, the fullest by used
+fraction are listed, still in name order, disks without a mounted filesystem
+give way first, and the title adds `· <k> fullest shown`.
+
+Rows left over by the panels go to the process table. The TUI keeps no
 per-metric sample history: apart from the GPU peak hold, each frame shows only
 the current snapshot.
 
@@ -354,6 +425,9 @@ src/
   metrics/
     mod.rs           Snapshot, Collector, GPU sample cadence, peak history
     cpu.rs           CPU total/per-core/brand helpers
+    disk/
+      mod.rs         DiskSnapshot, platform dispatch
+      linux.rs       sysfs + mountinfo attribution, statfs, layout cache
     memory.rs        RAM and swap helpers
     temp.rs          hwmon + thermal_zone reader
     gpu.rs           GpuBackend trait, NVML implementation, raw v2 memory API
@@ -373,6 +447,9 @@ src/
 - GPU sampling runs every 250 ms while unpaused and is independent from full
   UI refresh.
 - Paused mode stops GPU sampling too.
+- The disk and mount layout is rescanned at most every 5 seconds; between
+  scans a collection costs one `stat` and one `statfs` per mounted
+  filesystem.
 - Default steady-state budget: target under 1% CPU on an 8-logical-core host
   at 1 Hz.
 
@@ -404,6 +481,8 @@ Manual / hardware:
       inventory/accounting; process GPU% and VRAM render `—`.
 - [ ] `--no-gpu` skips NVML and opens no NVIDIA devices.
 - [ ] Multi-GPU host shows one panel per device and sums process VRAM.
+- [ ] Multi-disk host shows one row per physical disk; a disk with nothing
+      mounted shows its size and `no mounted filesystem`.
 - [ ] Terminal resize behaves at 40, 50, 60, 70, 76, 80, 100, and wide widths.
 - [ ] Idle CPU cost is measured and recorded for the release candidate.
 
