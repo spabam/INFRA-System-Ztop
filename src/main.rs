@@ -70,7 +70,6 @@ where
     let mut last_tick = Instant::now();
     collector.sample_gpu();
     let mut snapshot = collector.collect(app);
-    app.record_snapshot(&snapshot);
     terminal.draw(|f| {
         ui::prepare_frame(app, &snapshot, f.area());
         ui::draw(f, app, &snapshot);
@@ -125,7 +124,6 @@ where
         let now = Instant::now();
         if !app.paused && now.duration_since(last_tick) >= app.refresh_interval() {
             snapshot = collector.collect(app);
-            app.record_snapshot(&snapshot);
             last_tick = now;
             needs_draw = true;
         }

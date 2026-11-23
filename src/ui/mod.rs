@@ -15,7 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::{process_matches, AppState, History},
+    app::{process_matches, AppState},
     metrics::{GpuSampleStatus, GpuSnapshot, Snapshot},
 };
 
@@ -34,7 +34,6 @@ struct PanelLayout {
     memory: Rect,
     gpus: Vec<(usize, Rect)>,
     gpu_none: Option<Rect>,
-    history: Option<Rect>,
     table: Rect,
     footer: Rect,
     compact: bool,
@@ -54,28 +53,23 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
     let compact = area.height < 22;
     let n_gpus = snap.gpus.len().max(1);
     let mut core_rows = 0;
-    let mut history_height = 0;
     let (gpu_count, gpu_height) = if compact {
         (1, 1)
     } else {
         // Header + footer use three rows. Always reserve eight for processes.
         let budget = area.height.saturating_sub(3 + 8 + 4 + 4);
         // Per-core rows are mandatory: no key hides them, and they take the
-        // flexible space first, ahead of GPU panel height, extra GPU panels,
-        // and the history strip. Only one three-row GPU panel is kept ahead
-        // of them, so they are trimmed solely when the terminal cannot hold
-        // them next to the eight process rows at all.
+        // flexible space first, ahead of GPU panel height and extra GPU
+        // panels. Only one three-row GPU panel is kept ahead of them, so they
+        // are trimmed solely when the terminal cannot hold them next to the
+        // eight process rows at all. Rows the panels leave over go to the
+        // process table.
         let n_cores = snap.cpu_per_core_pct.len().max(1);
         let desired = n_cores.div_ceil(cores_per_row(area.width, n_cores));
         core_rows = desired.min(usize::from(budget.saturating_sub(3)));
         let gpu_budget = budget.saturating_sub(core_rows as u16);
         let count = usize::from(gpu_budget / 3).max(1).min(n_gpus);
         let height = if gpu_budget >= count as u16 * 5 { 5 } else { 3 };
-        let spare = gpu_budget.saturating_sub(count as u16 * height);
-        let requested_history = if snap.gpus.is_empty() { 4 } else { 6 };
-        if !app.histories.cpu.is_empty() && spare >= requested_history + 2 {
-            history_height = requested_history;
-        }
         (count, height)
     };
     let gpu_pages = n_gpus.div_ceil(gpu_count);
@@ -96,7 +90,6 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
             gpus.push((index, take_rows(&mut remaining, gpu_height)));
         }
     }
-    let history = (history_height > 0).then(|| take_rows(&mut remaining, history_height));
     let table_height = remaining.height.saturating_sub(2);
     let table = take_rows(&mut remaining, table_height);
     let footer = remaining;
@@ -106,7 +99,6 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
         memory,
         gpus,
         gpu_none,
-        history,
         table,
         footer,
         compact,
@@ -158,15 +150,6 @@ pub fn draw(f: &mut Frame, app: &AppState, snap: &Snapshot) {
     }
     for &(index, area) in &layout.gpus {
         draw_gpu(f, area, &snap.gpus[index], snap, layout.gpu_pages);
-    }
-    if let Some(area) = layout.history {
-        draw_history(
-            f,
-            area,
-            app,
-            snap,
-            layout.gpus.first().map(|(index, _)| *index),
-        );
     }
     table::draw(f, layout.table, snap, app);
     draw_footer(f, layout.footer, app);
@@ -455,61 +438,6 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &GpuSnapshot, snap: &Snapshot, pages: 
         .block(block),
         area,
     );
-}
-
-fn draw_history(
-    f: &mut Frame,
-    area: Rect,
-    app: &AppState,
-    snap: &Snapshot,
-    gpu_index: Option<usize>,
-) {
-    let width = area.width.saturating_sub(10) as usize;
-    let mut lines = vec![
-        history_line("CPU", &app.histories.cpu, width),
-        history_line("RAM", &app.histories.ram, width),
-    ];
-    if let Some(index) = gpu_index {
-        let gpu = &snap.gpus[index];
-        if let Some(history) = app.histories.gpu.get(&gpu.id) {
-            lines.push(history_line(&format!("GPU{}", gpu.index), history, width));
-        }
-        if let Some(history) = app.histories.vram.get(&gpu.id) {
-            lines.push(history_line("VRAM", history, width));
-        }
-    }
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" Recent samples · 0–100% ", TITLE)),
-        ),
-        area,
-    );
-}
-
-fn history_line(label: &str, history: &History, width: usize) -> Line<'static> {
-    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let spark: String = history
-        .iter()
-        .skip(history.len().saturating_sub(width))
-        .map(|value| {
-            value
-                .map(|v| LEVELS[(v.min(100) * 7 / 100) as usize])
-                .unwrap_or(' ')
-        })
-        .collect();
-    Line::from(vec![
-        Span::styled(format!("{label:<6}"), LABEL),
-        Span::styled(
-            format!(
-                "{:>width$}{spark}",
-                "",
-                width = width.saturating_sub(history.len())
-            ),
-            Style::default().fg(Color::Green),
-        ),
-    ])
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &AppState) {

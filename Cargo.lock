@@ -2263,7 +2263,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 
 [[package]]
 name = "ztop"
-version = "0.9.12+20261121.1113"
+version = "0.9.13+20261123.1607"
 dependencies = [
  "anyhow",
  "clap",

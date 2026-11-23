@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.13+20261123.1607] — 2026-11-23
+
+### Removed
+
+- The `Recent samples · 0–100%` panel: the CPU/RAM/GPU/VRAM sparkline strip
+  that tall terminals drew between the GPU panels and the process table. The
+  60-sample histories existed only to feed it and are gone too, so a refresh
+  no longer records anything for it.
+
+### Changed
+
+- The rows the panel used (six with a GPU, four without) go to the process
+  table. At 151x35 on a 32-thread, one-GPU host the table holds 14 process
+  rows instead of 8. Rows past the process limit stay blank; raise the limit
+  with `]`, `--top`, or `top_processes` to fill them.
+- Terminals that were too short for the panel, such as 80x24, render as
+  before.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  in debug and release (71 passed, 1 ignored) green. `cargo fmt --check` also
+  needed one test in `src/config.rs` re-wrapped; it had drifted from rustfmt's
+  layout before this release.
+- ShellCheck, the version checks, all 57 shell fixtures, and the five runtime
+  tests against the release build passed.
+- The installed 0.9.12 and this build were captured through a pseudo-terminal
+  at 151x35 and 80x24. At 151x35 the panel is gone and the process table
+  starts directly under the GPU panel; at 80x24 both builds draw the same
+  panels.
+
 ## [0.9.12+20261121.1113] — 2026-11-21
 
 - Upgrade terminal and error-handling dependencies to address security advisories.

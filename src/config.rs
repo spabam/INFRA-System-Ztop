@@ -182,11 +182,20 @@ mod tests {
     #[test]
     fn valid_explicit_options_override_invalid_file_values() {
         let (mut cli, matches) = parse(&[
-            "ztop", "--refresh", "1", "--sort", "ram", "--top", "4", "--gpu-peak-hold", "3",
+            "ztop",
+            "--refresh",
+            "1",
+            "--sort",
+            "ram",
+            "--top",
+            "4",
+            "--gpu-peak-hold",
+            "3",
         ]);
         let cfg: FileConfig = toml::from_str(
             "refresh_interval = 9.0\nsort_by = 'bogus'\ntop_processes = 0\ngpu_peak_hold = 31.0",
-        ).unwrap();
+        )
+        .unwrap();
         apply(&mut cli, &matches, &cfg).unwrap();
         assert_eq!(cli.refresh, 1.0);
         assert!(matches!(cli.sort, SortArg::Ram));

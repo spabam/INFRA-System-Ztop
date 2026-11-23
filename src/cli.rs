@@ -23,7 +23,7 @@ Features:
   - 1-second refresh by default, configurable 0.25-5.0s
   - Top-N process table, configurable 1-200 rows (also adjustable live with [ and ])
   - --json prints one metrics snapshot; --json-stream emits newline-delimited JSON
-  - Process search, scrolling, compact panels, and recent metric histories
+  - Process search, scrolling, and compact panels
   - --verbose prints detailed GPU init diagnostics before the TUI starts
   - Single executable, no libsensors or nvidia-smi runtime dependencies
   - Responsive layout that adapts to narrow and short terminals

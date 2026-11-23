@@ -2,7 +2,7 @@
 name = "ztop"
 # Monotonically increasing SemVer; UTC build metadata identifies the build.
 # Update release versions with scripts/version.sh. See README §Versioning.
-version = "0.9.12+20261121.1113"
+version = "0.9.13+20261123.1607"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Andrea Bodei <info@andreabodei.com>"]

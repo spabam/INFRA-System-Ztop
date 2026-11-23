@@ -1,18 +1,12 @@
 // Copyright (c) 2026 Andrea Bodei <info@andreabodei.com>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Duration,
-};
+use std::time::Duration;
 
 use crate::{
     cli::{Cli, SortArg},
-    metrics::{GpuSampleStatus, ProcRow, Snapshot},
+    metrics::ProcRow,
 };
-
-pub const HISTORY_SAMPLES: usize = 60;
-pub type History = VecDeque<Option<u64>>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SortMode {
@@ -47,14 +41,6 @@ impl From<SortArg> for SortMode {
     }
 }
 
-#[derive(Default)]
-pub struct MetricHistories {
-    pub cpu: History,
-    pub ram: History,
-    pub gpu: HashMap<String, History>,
-    pub vram: HashMap<String, History>,
-}
-
 pub struct AppState {
     pub sort: SortMode,
     pub paused: bool,
@@ -68,7 +54,6 @@ pub struct AppState {
     pub search_editing: bool,
     pub gpu_page: usize,
     pub gpu_page_count: usize,
-    pub histories: MetricHistories,
     pub(crate) search_original_filter: String,
 }
 
@@ -87,7 +72,6 @@ impl Default for AppState {
             search_editing: false,
             gpu_page: 0,
             gpu_page_count: 1,
-            histories: MetricHistories::default(),
             search_original_filter: String::new(),
         }
     }
@@ -151,39 +135,6 @@ impl AppState {
         self.search_original_filter.clear();
         self.search_editing = false;
     }
-
-    pub fn record_snapshot(&mut self, snap: &Snapshot) {
-        push_history(&mut self.histories.cpu, percent(snap.cpu_total_pct as f64));
-        push_history(
-            &mut self.histories.ram,
-            ratio(snap.ram_used_bytes, snap.ram_total_bytes),
-        );
-        self.histories
-            .gpu
-            .retain(|id, _| snap.gpus.iter().any(|gpu| gpu.id == *id));
-        self.histories
-            .vram
-            .retain(|id, _| snap.gpus.iter().any(|gpu| gpu.id == *id));
-        for gpu in &snap.gpus {
-            let fresh = gpu.status == GpuSampleStatus::Fresh;
-            push_history(
-                self.histories.gpu.entry(gpu.id.clone()).or_default(),
-                if fresh {
-                    gpu.util_pct.map(|v| u64::from(v.min(100)))
-                } else {
-                    None
-                },
-            );
-            push_history(
-                self.histories.vram.entry(gpu.id.clone()).or_default(),
-                if fresh {
-                    ratio(gpu.vram_used_bytes, gpu.vram_total_bytes)
-                } else {
-                    None
-                },
-            );
-        }
-    }
 }
 
 /// The query is normalized once per scan, rather than once per process.
@@ -192,25 +143,6 @@ pub fn process_matches(row: &ProcRow, lowercase_query: &str) -> bool {
         || row.command.to_lowercase().contains(lowercase_query)
         || row.user.to_lowercase().contains(lowercase_query)
         || row.pid.to_string().contains(lowercase_query)
-}
-
-fn percent(value: f64) -> Option<u64> {
-    value
-        .is_finite()
-        .then(|| value.clamp(0.0, 100.0).round() as u64)
-}
-
-fn ratio(used: u64, total: u64) -> Option<u64> {
-    (total > 0)
-        .then(|| percent(used as f64 / total as f64 * 100.0))
-        .flatten()
-}
-
-fn push_history(history: &mut History, value: Option<u64>) {
-    if history.len() == HISTORY_SAMPLES {
-        history.pop_front();
-    }
-    history.push_back(value);
 }
 
 #[cfg(test)]
@@ -244,18 +176,6 @@ mod tests {
         assert_eq!(app.top_n, 1);
         app.bump_top(500);
         assert_eq!(app.top_n, 200);
-    }
-
-    #[test]
-    fn history_is_bounded_and_preserves_gaps() {
-        let mut history = History::new();
-        for n in 0..100 {
-            push_history(&mut history, Some(n));
-        }
-        push_history(&mut history, None);
-        assert_eq!(history.len(), HISTORY_SAMPLES);
-        assert_eq!(history.front(), Some(&Some(41)));
-        assert_eq!(history.back(), Some(&None));
     }
 
     #[test]

@@ -29,11 +29,10 @@ fn crowded_servers_keep_processes_and_navigation_visible() {
 }
 
 #[test]
-fn sparse_gpu_panels_and_histories_use_physical_index() {
+fn sparse_gpu_panels_use_physical_index() {
     let mut snap = snapshot(1, 8, 2);
     snap.gpus[0].index = 7;
     let mut app = AppState::default();
-    app.record_snapshot(&snap);
     for height in [12, 24, 40] {
         let rendered = render(80, height, &mut app, &snap);
         assert!(rendered.contains("GPU7"));
@@ -196,22 +195,27 @@ fn stale_and_unavailable_gpu_values_are_not_presented_as_fresh() {
 }
 
 #[test]
-fn histories_follow_device_identity_and_preserve_missing_samples() {
-    let mut snap = snapshot(2, 8, 2);
-    snap.gpus[0].util_pct = Some(10);
-    snap.gpus[1].util_pct = Some(90);
-    let mut app = AppState::default();
-    app.record_snapshot(&snap);
-    snap.gpus.swap(0, 1);
-    snap.gpus[1].status = GpuSampleStatus::Stale;
-    app.record_snapshot(&snap);
-    assert_eq!(app.histories.gpu["test-gpu-0"].back(), Some(&None));
-    assert_eq!(app.histories.gpu["test-gpu-1"].back(), Some(&Some(90)));
-    let rendered = render(100, 48, &mut app, &snap);
-    assert!(rendered.contains("Recent samples"));
-    assert!(rendered.contains('▇'));
-    let rendered = render(80, 24, &mut app, &snap);
-    assert!(!rendered.contains("Recent samples"));
+fn rows_left_over_by_the_panels_go_to_the_process_table() {
+    let mut app = AppState {
+        top_n: 40,
+        ..AppState::default()
+    };
+    // Header (1), CPU (4 + one core row), RAM/swap (4), and two five-row GPU
+    // panels use 20 of the 48 rows; the footer takes two and the table frame
+    // and column header three. The other 23 are process rows: no panel sits
+    // between the GPUs and the table to claim them.
+    let rendered = render(100, 48, &mut app, &snapshot(2, 8, 40));
+    assert_eq!(app.process_viewport_rows, 23);
+    let rows = rendered.lines().collect::<Vec<_>>();
+    assert!(rows[19].starts_with('└'), "{rendered}");
+    assert!(rows[20].contains("Processes 1–23 / 40"), "{rendered}");
+    assert!(rows[44].contains("python worker-22"), "{rendered}");
+    // With a single GPU the table starts five rows higher still.
+    render(100, 48, &mut app, &snapshot(1, 8, 40));
+    assert_eq!(app.process_viewport_rows, 28);
+    // Without a GPU the three-row placeholder is the only GPU panel.
+    render(100, 48, &mut app, &snapshot(0, 8, 40));
+    assert_eq!(app.process_viewport_rows, 30);
 }
 
 #[test]

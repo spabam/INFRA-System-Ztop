@@ -2,7 +2,7 @@
 
 `ZTOP` is a tool to monitor CPU, RAM, GPU, VRAM in the top/htop style and with modern compatibility to nvidia drivers (it works where btop fails). Written from scratch in Rust. `by Andrea Bodei info@andreabodei.com 2026`.
 
-**Status:** v0.9.12+20261121.1113 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
+**Status:** v0.9.13+20261123.1607 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
 
 A simple, clean, real-time Linux system monitor inspired by `btop`, focused on the essential metrics:
 
@@ -65,7 +65,7 @@ The header shows the running version right next to the `ZTOP` title (e.g. `ZTOP 
 
 The CPU panel title carries the physical core and logical CPU (thread) counts, e.g. ` CPU · 12 cores / 14 threads `, directly above the CPU model line. On platforms that hide the physical topology (some containers and virtual machines) only the thread count is shown. The title carries no key hints: press `C` to hide or show the per-core rows, as listed in the `?` help overlay. The compact short-terminal summary carries the same counts.
 
-The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. Recent CPU/RAM/GPU/VRAM histories appear when space allows.
+The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. Rows the panels leave over go to the process table.
 
 Per-core layout automatically uses the available terminal width, so wide terminals pack more cores per row and high-core-count servers need fewer CPU-panel rows. The process table drops columns as the terminal narrows (VRAM below 76 cols, GPU% below 70, USER below 60).
 
@@ -469,9 +469,7 @@ Arrow keys and PageUp/PageDown scroll through the selected top processes.
 Additional controls: `/` searches; Enter accepts a search and Escape restores
 the previous query. Escape outside search dismisses help, clears an active filter,
 then quits. Up/Down, PageUp/PageDown, Home/End move through process rows;
-`C` toggles core details; `{` / `}` select GPU pages. Histories retain the latest
-60 collected snapshots and stop advancing while paused. GPU/VRAM history shows
-the first device on the selected GPU page; histories for all device IDs are retained.
+`C` toggles core details; `{` / `}` select GPU pages.
 
 ## Sorting Logic
 
@@ -741,9 +739,9 @@ publishing. Ordinary development edits do not require a new release number.
 ## Project Status
 
 The current development version is listed in **Status** above and reported by
-`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, bounded metric history,
-process filtering and scrolling, config overrides, one-shot JSON, and JSON
-streaming are implemented. The memory-management companion is separately enabled
+`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, process filtering
+and scrolling, config overrides, one-shot JSON, and JSON streaming are
+implemented. The memory-management companion is separately enabled
 and defaults to preview mode. See [`RELEASE.md`](./RELEASE.md) for remaining
 hardware qualification before a public release.
 

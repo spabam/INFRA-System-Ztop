@@ -7,8 +7,8 @@ stay true as the code evolves.
 
 The historical v0.1 MVP is complete. The current implementation includes
 multi-GPU panels, config-file defaults, headless JSON output, live help, live
-row-count adjustment, GPU peak hold, process search and scrolling, bounded
-metric histories, JSON streaming, and monotonically increasing release versions.
+row-count adjustment, GPU peak hold, process search and scrolling, JSON
+streaming, and monotonically increasing release versions.
 
 ---
 
@@ -26,7 +26,7 @@ ZTOP is a compact Linux terminal monitor focused on:
 - TUI mode with keyboard control and width-responsive layout
 - JSON snapshot mode and newline-delimited streaming with an optional count
 - Case-insensitive command/user/PID filtering in both TUI and JSON
-- Height-aware layouts, GPU paging, process scrolling, and recent histories
+- Height-aware layouts, GPU paging, and process scrolling
 - Single release binary with no `libsensors` or `nvidia-smi` runtime dependency
 
 Out of current scope: AMD/Intel GPU telemetry, Prometheus export, container
@@ -334,10 +334,10 @@ filter, top-N, process-list, or terminal-size changes. Numeric columns expand fo
 long PIDs and large CPU values; truncation respects grapheme/display width.
 Memory units shown in the TUI are GiB/MiB (powers of 1024).
 
-Histories keep the last 60 collected CPU/RAM/GPU/VRAM samples and appear when
-height permits. GPU/VRAM history displays the first GPU on the selected page. GPU histories use device identities and gaps for missing/stale
-readings. Redrawing, searching, and sorting do not add history samples; pause
-stops history advancement.
+Rows left over by the header, CPU, memory, and GPU panels go to the process
+table; nothing is drawn between the GPU panels and the table. The TUI keeps no
+per-metric sample history: apart from the GPU peak hold, each frame shows only
+the current snapshot.
 
 ---
 
@@ -350,7 +350,7 @@ src/
   input.rs           tested key-to-state transitions
   cli.rs             clap definition, help text, value validation
   config.rs          optional TOML config file and CLI precedence
-  app.rs             state, filtering, navigation, bounded histories
+  app.rs             state, filtering, navigation
   metrics/
     mod.rs           Snapshot, Collector, GPU sample cadence, peak history
     cpu.rs           CPU total/per-core/brand helpers
