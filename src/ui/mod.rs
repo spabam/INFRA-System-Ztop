@@ -4,8 +4,6 @@
 mod bars;
 mod table;
 
-use std::borrow::Cow;
-
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -25,8 +23,12 @@ const CORE_LABEL_WIDTH: usize = 6;
 const MIN_CORE_INDEX_WIDTH: usize = 2;
 const CORE_USAGE_WIDTH: usize = 4;
 const BAR_START_COL: usize = 34;
+/// A bar narrower than this says nothing and is left out.
+const MIN_BAR_WIDTH: usize = 4;
 /// The disk panel lists at most this many disks, however tall the terminal.
-const MAX_DISK_ROWS: usize = 4;
+const MAX_DISKS: usize = 4;
+/// Rows a listed disk takes: what the drive is, then how full and how warm.
+const DISK_ROWS: usize = 2;
 const LABEL: Style = Style::new().fg(Color::Cyan);
 const BRAND: Style = Style::new().fg(Color::Gray);
 const TEMP: Style = Style::new().fg(Color::Yellow);
@@ -75,7 +77,7 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
         let gpu_budget = budget.saturating_sub(core_rows as u16);
         let count = usize::from(gpu_budget / 3).max(1).min(n_gpus);
         let height = if gpu_budget >= count as u16 * 5 { 5 } else { 3 };
-        // The disk panel comes last: a frame around one row per physical
+        // The disk panel comes last: a frame around two rows per physical
         // disk, and only while the process table keeps two rows more than
         // its minimum. Rows left after that go to the process table.
         let gpu_rows = if snap.gpus.is_empty() {
@@ -87,8 +89,9 @@ fn panel_layout(area: Rect, app: &AppState, snap: &Snapshot) -> PanelLayout {
         disk_rows = snap
             .disks
             .len()
-            .min(MAX_DISK_ROWS)
-            .min(spare.saturating_sub(4));
+            .min(MAX_DISKS)
+            .min(spare.saturating_sub(4) / DISK_ROWS)
+            * DISK_ROWS;
         (count, height)
     };
     let gpu_pages = n_gpus.div_ceil(gpu_count);
@@ -232,6 +235,15 @@ fn cpu_temperature(snap: &Snapshot) -> String {
         .unwrap_or_else(|| "n/a".into())
 }
 
+/// `temp: 52°C`, as the CPU, GPU and disk rows all show a reading.
+fn temp_spans(reading: String) -> [Span<'static>; 3] {
+    [
+        Span::styled("temp", LABEL),
+        Span::raw(": "),
+        Span::styled(reading, TEMP),
+    ]
+}
+
 /// `12 cores / 14 threads`, or just `14 threads` when the platform hides the
 /// physical core count (some containers and virtual machines do).
 fn cpu_topology(snap: &Snapshot) -> String {
@@ -262,10 +274,8 @@ fn draw_cpu(f: &mut Frame, area: Rect, snap: &Snapshot, core_rows: usize) {
     let mut total = vec![
         Span::styled("CPU", LABEL),
         Span::raw(format!("   {:5.1}%   ", snap.cpu_total_pct)),
-        Span::styled("temp", LABEL),
-        Span::raw(": "),
-        Span::styled(cpu_temperature(snap), TEMP),
     ];
+    total.extend(temp_spans(cpu_temperature(snap)));
     append_aligned_bar(&mut total, 3 + prefix.width(), snap.cpu_total_pct, area);
     let mut lines = vec![
         Line::styled(
@@ -319,28 +329,11 @@ fn draw_compact_memory(f: &mut Frame, area: Rect, snap: &Snapshot) {
     );
 }
 
-/// `LABEL   16.4 /  93.9 GiB  17.5%  [████░░░░]`: the row shared by RAM, swap,
-/// VRAM and each disk.
-fn usage_line(
-    label: impl Into<Cow<'static, str>>,
-    used: u64,
-    total: u64,
-    area: Rect,
-) -> Line<'static> {
+/// `LABEL   16.4 /  93.9 GiB  17.5%  [████░░░░]`: the row shared by RAM, swap
+/// and VRAM.
+fn usage_line(label: &'static str, used: u64, total: u64, area: Rect) -> Line<'static> {
     let pct = used as f64 / total.max(1) as f64 * 100.0;
-    usage_line_at(label, used, total, pct, area)
-}
-
-/// [`usage_line`] with a percentage that is not simply `used / total`.
-fn usage_line_at(
-    label: impl Into<Cow<'static, str>>,
-    used: u64,
-    total: u64,
-    pct: f64,
-    area: Rect,
-) -> Line<'static> {
-    let label = label.into();
-    let text = format!("  {} {pct:5.1}%", capacity_pair(Some(used), total));
+    let text = format!("  {} {pct:5.1}%", capacity_pair(used, total));
     let prefix_width = label.width() + text.width();
     let mut spans = vec![Span::styled(label, LABEL), Span::raw(text)];
     append_aligned_bar(&mut spans, prefix_width, pct as f32, area);
@@ -360,13 +353,11 @@ fn capacity_unit(bytes: u64) -> (&'static str, f64, usize) {
 }
 
 /// `used / total` in the unit of `total`, both numbers five columns wide so
-/// that what follows starts in the same column on every row. `used` is `None`
-/// where nothing was measured.
-fn capacity_pair(used: Option<u64>, total: u64) -> String {
+/// that what follows starts in the same column on every row.
+fn capacity_pair(used: u64, total: u64) -> String {
     let (unit, unit_bytes, decimals) = capacity_unit(total);
     let number = |bytes: u64| format!("{:5.decimals$}", bytes as f64 / unit_bytes);
-    let used = used.map_or_else(|| format!("{:>5}", "—"), number);
-    format!("{used} / {} {unit}", number(total))
+    format!("{} / {} {unit}", number(used), number(total))
 }
 
 fn capacity(bytes: u64) -> String {
@@ -477,10 +468,8 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &GpuSnapshot, snap: &Snapshot, pages: 
     let mut spans = vec![
         Span::styled("GPU", LABEL),
         Span::raw(format!("   {util}{peak}  ")),
-        Span::styled("temp", LABEL),
-        Span::raw(": "),
-        Span::styled(temp, TEMP),
     ];
+    spans.extend(temp_spans(temp));
     if available {
         if let Some(pct) = g.util_pct {
             append_aligned_bar(&mut spans, 3 + gpu_text.width(), pct as f32, area);
@@ -511,19 +500,19 @@ fn draw_gpu(f: &mut Frame, area: Rect, g: &GpuSnapshot, snap: &Snapshot, pages: 
     );
 }
 
-/// The disks to list in `rows` rows: all of them when they fit, otherwise the
-/// fullest ones, still in device-name order. Disks with nothing mounted give
-/// way first.
-fn fullest_disks(disks: &[DiskSnapshot], rows: usize) -> Vec<&DiskSnapshot> {
+/// The disks to list when there is room for `count`: all of them when they
+/// fit, otherwise the fullest ones, still in device-name order. Disks with
+/// nothing mounted give way first.
+fn fullest_disks(disks: &[DiskSnapshot], count: usize) -> Vec<&DiskSnapshot> {
     let mut picked: Vec<usize> = (0..disks.len()).collect();
-    if picked.len() > rows {
+    if picked.len() > count {
         let fullness = |disk: &DiskSnapshot| match disk.filesystems {
             0 => -1.0,
             _ => disk_used_pct(disk),
         };
         // The sort is stable: equally full disks keep their name order.
         picked.sort_by(|&a, &b| fullness(&disks[b]).total_cmp(&fullness(&disks[a])));
-        picked.truncate(rows);
+        picked.truncate(count);
         picked.sort_unstable();
     }
     picked.into_iter().map(|index| &disks[index]).collect()
@@ -555,37 +544,72 @@ fn disks_title(disks: &[DiskSnapshot], shown: usize, max_width: usize) -> String
     }
 }
 
-/// One row per physical disk: how full the filesystems mounted on it are.
+/// What a disk row is headed by, as the CPU and GPU panels name their device
+/// above its figures: `WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 372 of
+/// 1740 GiB used`. The model and kind come first; the kernel name tells two
+/// drives of one model apart, and the sizes are what the percentage in the
+/// row below is a percentage of.
+fn disk_description(disk: &DiskSnapshot) -> String {
+    let named = [
+        disk.model.as_deref(),
+        disk.kind.as_deref(),
+        Some(&disk.name),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    if disk.filesystems == 0 {
+        return format!("{named} | no mounted filesystem");
+    }
+    let (unit, unit_bytes, decimals) = capacity_unit(disk.fs_total_bytes);
+    format!(
+        "{named} | {:.decimals$} of {:.decimals$} {unit} used",
+        disk.fs_used_bytes as f64 / unit_bytes,
+        disk.fs_total_bytes as f64 / unit_bytes
+    )
+}
+
+/// `Disk   22.5%   temp: 52°C       [████░░░░]`: the CPU row's shape, with how
+/// full the disk's filesystems are in place of a load. A disk with nothing
+/// mounted has no percentage and no bar.
+fn disk_line(disk: &DiskSnapshot, area: Rect) -> Line<'static> {
+    let mounted = disk.filesystems > 0;
+    let pct = disk_used_pct(disk);
+    let figure = if mounted {
+        format!("{pct:5.1}%")
+    } else {
+        format!("{:>6}", "—")
+    };
+    let reading = disk
+        .temp_c
+        .map_or_else(|| "n/a".into(), |degrees| format!("{degrees}°C"));
+    let text = format!("  {figure}   ");
+    let prefix_width = "Disk".width() + text.width() + "temp: ".width() + reading.width();
+    let mut spans = vec![Span::styled("Disk", LABEL), Span::raw(text)];
+    spans.extend(temp_spans(reading));
+    if mounted {
+        append_aligned_bar(&mut spans, prefix_width, pct as f32, area);
+    }
+    Line::from(spans)
+}
+
+/// Two rows per physical disk, as the CPU and GPU panels have: what the
+/// drive is, then how full its filesystems are and how warm it is.
 fn draw_disks(f: &mut Frame, area: Rect, disks: &[DiskSnapshot]) {
-    let shown = fullest_disks(disks, usize::from(area.height.saturating_sub(2)));
-    let label_width = shown
-        .iter()
-        .map(|disk| disk.name.width())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-    let lines = shown
-        .iter()
-        .map(|disk| {
-            let label = format!("{:<label_width$}", disk.name);
-            if disk.filesystems == 0 {
-                // No usage to show, only how large the device is.
-                let size = capacity_pair(None, disk.size_bytes);
-                Line::from(vec![
-                    Span::styled(label, LABEL),
-                    Span::raw(format!("  {size}  no mounted filesystem")),
-                ])
-            } else {
-                usage_line_at(
-                    label,
-                    disk.fs_used_bytes,
-                    disk.fs_total_bytes,
-                    disk_used_pct(disk),
-                    area,
-                )
-            }
-        })
-        .collect::<Vec<_>>();
+    let width = usize::from(area.width.saturating_sub(2));
+    let shown = fullest_disks(
+        disks,
+        usize::from(area.height.saturating_sub(2)) / DISK_ROWS,
+    );
+    let mut lines = Vec::with_capacity(shown.len() * DISK_ROWS);
+    for disk in &shown {
+        lines.push(Line::styled(
+            truncate(&disk_description(disk), width),
+            BRAND,
+        ));
+        lines.push(disk_line(disk, area));
+    }
     let title = disks_title(disks, shown.len(), area.width.saturating_sub(2) as usize);
     f.render_widget(
         Paragraph::new(lines).block(
@@ -708,7 +732,7 @@ pub(super) fn truncate(s: &str, width: usize) -> String {
 fn append_aligned_bar(spans: &mut Vec<Span<'static>>, prefix_width: usize, pct: f32, area: Rect) {
     let padding = BAR_START_COL.saturating_sub(prefix_width).max(1);
     let width = usize::from(area.width.saturating_sub(2)).saturating_sub(prefix_width + padding);
-    if width >= 4 {
+    if width >= MIN_BAR_WIDTH {
         spans.push(Span::raw(" ".repeat(padding)));
         spans.extend(bars::bar_spans(pct, width as u16));
     }

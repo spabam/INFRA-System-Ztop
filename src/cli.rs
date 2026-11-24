@@ -20,8 +20,10 @@ Features:
     open /dev/nvidia-uvm for device telemetry. Use --no-gpu to skip NVML entirely
   - Multi-GPU: every NVIDIA device gets its own panel; per-process VRAM is
     summed across devices
-  - Disks: one row per physical disk with the used/total/percentage of the
-    filesystems mounted on it, through partitions, LVM, LUKS and MD RAID
+  - Disks: each physical disk as the CPU and GPU are shown: its model and
+    kind, then the percentage used of the filesystems mounted on it (through
+    partitions, LVM, LUKS and MD RAID), the drive's temperature (NVMe; SATA
+    and SAS with the drivetemp module) and a bar
   - 1-second refresh by default, configurable 0.25-5.0s
   - Top-N process table, configurable 1-200 rows (also adjustable live with [ and ])
   - --json prints one metrics snapshot; --json-stream emits newline-delimited JSON
@@ -37,10 +39,12 @@ JSON output:
   device and observation; unavailable utilization and temperature are null.
   cpu_physical_cores is the physical core count (null when the host hides it);
   the thread count is the length of cpu_per_core_pct.
-  disks lists each physical disk: name, size_bytes (the raw device), the
+  disks lists each physical disk: name, model and kind (null when the
+  kernel does not say), size_bytes (the raw device), the
   number of mounted filesystems measured on it, and their fs_used_bytes,
   fs_total_bytes and fs_available_bytes. Each disk of an MD RAID 1 mirror
-  reports the whole filesystem.
+  reports the whole filesystem. temp_c is the drive's temperature in whole
+  degrees, null where the kernel has no sensor for it and with --no-temp.
 
 Configuration file (optional):
   ~/.config/ztop/config.toml is read at startup ($XDG_CONFIG_HOME honored).
@@ -140,11 +144,11 @@ pub struct Cli {
     #[arg(long, conflicts_with = "no_pid_gpu")]
     pub pid_gpu: bool,
 
-    /// Skip CPU temperature probing
+    /// Skip CPU and disk temperature probing
     #[arg(long)]
     pub no_temp: bool,
 
-    /// Enable CPU temperature probing even when disabled in config
+    /// Enable CPU and disk temperature probing even when disabled in config
     #[arg(long, conflicts_with = "no_temp")]
     pub temp: bool,
 

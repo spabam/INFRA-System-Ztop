@@ -120,6 +120,7 @@ mod tests {
         assert!(snapshot.procs.len() <= 1);
         assert!(snapshot.gpus.is_empty());
         assert!(snapshot.cpu_temp_c.is_none());
+        assert!(snapshot.disks.iter().all(|disk| disk.temp_c.is_none()));
     }
 
     #[test]

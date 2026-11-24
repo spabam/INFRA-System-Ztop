@@ -6,7 +6,8 @@
 //! the disks underneath it: through partitions, and through the `slaves` of
 //! device-mapper (LVM, LUKS) and MD RAID devices. Each disk of an MD RAID 1
 //! mirror holds the whole filesystem; any other filesystem on several disks
-//! is divided between them.
+//! is divided between them. A drive's model, its kind and its temperature
+//! (the hwmon sensor) are what sysfs lists under the drive's own hardware.
 
 use std::{
     collections::BTreeMap,
@@ -32,6 +33,9 @@ const MAX_STACK_DEPTH: u8 = 8;
 /// change rarely, and reading the mount table is the costly part: it grows
 /// with every container on the host. Usage is measured on every sample.
 const TOPOLOGY_TTL: Duration = Duration::from_secs(5);
+/// Degrees Celsius a drive can really be at. A drive that measures nothing
+/// reports zero kelvin, and a failed query can leave any number behind.
+const PLAUSIBLE_CELSIUS: std::ops::RangeInclusive<i64> = -50..=150;
 
 /// `major:minor`.
 type DeviceNumber = (u32, u32);
@@ -53,20 +57,35 @@ struct Usage {
 }
 
 /// Samples the disks, remembering between samples where each filesystem lives.
-#[derive(Default)]
 pub struct Probe {
     topology: Topology,
     scanned_at: Option<Instant>,
+    temperatures: bool,
 }
 
 impl Probe {
+    /// `temperatures` is whether the drives are asked for their temperature.
+    pub fn new(temperatures: bool) -> Self {
+        Self {
+            topology: Topology::default(),
+            scanned_at: None,
+            temperatures,
+        }
+    }
+
     pub fn sample(&mut self) -> Vec<DiskSnapshot> {
         if self
             .scanned_at
             .is_none_or(|at| at.elapsed() >= TOPOLOGY_TTL)
         {
+            let sys = Path::new("/sys");
             let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-            self.topology = Topology::scan(Path::new("/sys"), &mountinfo, &device_number);
+            self.topology = Topology::scan(sys, &mountinfo, &device_number);
+            // A reading makes the kernel query the drive, and a drive warms
+            // and cools slowly: take one per scan, not one per sample.
+            if self.temperatures {
+                self.topology.read_temperatures(sys);
+            }
             self.scanned_at = Some(Instant::now());
         }
         self.topology.measure(&usage)
@@ -137,6 +156,15 @@ impl Topology {
         Self { disks, filesystems }
     }
 
+    /// Asks every disk for its temperature. Measuring usage afterwards
+    /// repeats these readings until the next scan.
+    fn read_temperatures(&mut self, sys: &Path) {
+        let block = sys.join("block");
+        for disk in &mut self.disks {
+            disk.temp_c = temperature(&block.join(&disk.name));
+        }
+    }
+
     fn measure(&self, usage: &dyn Fn(&Mount) -> Option<Usage>) -> Vec<DiskSnapshot> {
         let mut disks = self.disks.clone();
         for filesystem in &self.filesystems {
@@ -187,18 +215,150 @@ fn physical_disks(sys: &Path) -> Vec<DiskSnapshot> {
             }
             // A card reader or drive without media reports no sectors.
             let size_bytes = sectors(&node) * SECTOR_BYTES;
-            (size_bytes > 0).then_some(DiskSnapshot {
+            (size_bytes > 0).then(|| DiskSnapshot {
+                model: model(&node),
+                kind: kind(sys, &name),
                 name,
                 size_bytes,
                 filesystems: 0,
                 fs_used_bytes: 0,
                 fs_total_bytes: 0,
                 fs_available_bytes: 0,
+                temp_c: None,
             })
         })
         .collect();
     disks.sort_by_cached_key(|disk| natural_key(&disk.name));
     disks
+}
+
+/// The model the drive at `node` (`/sys/block/<name>`) reports. An NVMe
+/// controller gives the whole name. A SCSI device gives 16 characters and a
+/// vendor, which is the placeholder `ATA` for every SATA drive and is then
+/// left out. A memory card has a short product name.
+fn model(node: &Path) -> Option<String> {
+    let text = |file: &str| {
+        let text = fs::read_to_string(node.join("device").join(file)).ok()?;
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!text.is_empty()).then_some(text)
+    };
+    let model = text("model").or_else(|| text("name"))?;
+    match text("vendor") {
+        Some(vendor)
+            if vendor != "ATA" && !model.to_lowercase().starts_with(&vendor.to_lowercase()) =>
+        {
+            Some(format!("{vendor} {model}"))
+        }
+        _ => Some(model),
+    }
+}
+
+/// What sort of drive `name` is: the bus it hangs off, read from its place in
+/// the sysfs device tree, and whether the kernel counts it as rotating.
+fn kind(sys: &Path, name: &str) -> Option<String> {
+    let node = sys.join("block").join(name);
+    if name.starts_with("nvme") {
+        return Some("NVMe SSD".to_owned());
+    }
+    if name.starts_with("mmcblk") {
+        let card = fs::read_to_string(node.join("device/type")).unwrap_or_default();
+        return Some(
+            match card.trim() {
+                "SD" => "SD card",
+                "MMC" => "eMMC",
+                _ => "memory card",
+            }
+            .to_owned(),
+        );
+    }
+    // .../ata3/host2/target2:0:0/2:0:0:0/block/sda: each directory between
+    // the root of sysfs and the disk is a device it is reached through.
+    let path = fs::canonicalize(&node).ok()?;
+    let root = fs::canonicalize(sys).ok()?;
+    let through: Vec<&str> = path
+        .strip_prefix(&root)
+        .ok()?
+        .iter()
+        .filter_map(|part| part.to_str())
+        .collect();
+    let via = |bus: &str| through.iter().any(|part| numbered(part, bus));
+    let starts = |prefix: &str| through.iter().any(|part| part.starts_with(prefix));
+    if via("usb") {
+        // A bridge hides what is behind it, and a stick is no disk that spins.
+        return Some("USB disk".to_owned());
+    }
+    if via("virtio") || starts("vbd-") {
+        return Some("virtual disk".to_owned());
+    }
+    let bus = if via("ata") {
+        "SATA"
+    } else if starts("end_device-") {
+        "SAS"
+    } else if name.starts_with("sd") {
+        "SCSI"
+    } else {
+        return None;
+    };
+    let medium = match fs::read_to_string(node.join("queue/rotational"))
+        .unwrap_or_default()
+        .trim()
+    {
+        "0" => "SSD",
+        "1" => "HDD",
+        _ => "disk",
+    };
+    Some(format!("{bus} {medium}"))
+}
+
+/// Temperature of the disk at `node` (`/sys/block/<name>`) in whole degrees
+/// Celsius, from the hwmon device the kernel registers for the drive's own
+/// hardware. An NVMe controller always has one. A SATA or SAS disk has one
+/// while the `drivetemp` module is loaded. USB bridges, memory cards and
+/// virtual disks have none. `temp1_input` is the drive's main sensor in both
+/// drivers; for NVMe that is the Composite temperature SMART reports.
+fn temperature(node: &Path) -> Option<i32> {
+    let device = node.join("device");
+    // A namespace that several controllers lead to hangs off its NVMe
+    // subsystem, which links to each of them. Every other disk hangs off the
+    // hardware itself.
+    let mut hardware = vec![device.clone()];
+    hardware.extend(
+        entry_names(&device)
+            .into_iter()
+            .filter(|name| numbered(name, "nvme"))
+            .map(|controller| device.join(controller)),
+    );
+    hardware
+        .iter()
+        // An NVMe controller holds its hwmon device directly, a SCSI device
+        // in a `hwmon` directory.
+        .flat_map(|parent| [parent.clone(), parent.join("hwmon")])
+        .flat_map(|holder| {
+            entry_names(&holder)
+                .into_iter()
+                .filter(|name| numbered(name, "hwmon"))
+                .map(move |name| holder.join(name))
+        })
+        .filter_map(|hwmon| {
+            let millidegrees: i64 = fs::read_to_string(hwmon.join("temp1_input"))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()?;
+            let degrees = (millidegrees + 500).div_euclid(1000);
+            PLAUSIBLE_CELSIUS
+                .contains(&degrees)
+                .then_some(degrees as i32)
+        })
+        // The controllers of one drive agree; should they not, the hotter
+        // reading is the one to act on.
+        .max()
+}
+
+/// `prefix` followed by digits and nothing else: `hwmon3`, `nvme0`.
+fn numbered(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Kernel names of the block devices a mounted filesystem sits on. Empty for
@@ -492,6 +652,33 @@ mod tests {
             fs::write(dir.join("partition"), "1\n").unwrap();
         }
 
+        /// A hardware disk at `path` below `devices/`. The directories on the
+        /// way are the devices it is reached through, as in sysfs; `files`
+        /// are what the kernel says about it, relative to the disk.
+        fn drive(&self, path: &str, number: &str, files: &[(&str, &str)]) {
+            let dir = self.node(path, number, 1000);
+            for part in ["slaves", "device", "queue"] {
+                fs::create_dir_all(dir.join(part)).unwrap();
+            }
+            for (file, content) in files {
+                fs::write(dir.join(file), content).unwrap();
+            }
+            symlink(&dir, self.0.join("block").join(dir.file_name().unwrap())).unwrap();
+        }
+
+        /// The temperature sensor of `disk`. `holder` is where its hardware
+        /// keeps the hwmon device, below the disk's `device` directory.
+        fn sensor(&self, disk: &str, holder: &str, millidegrees: &str) {
+            let dir = self
+                .0
+                .join("devices")
+                .join(disk)
+                .join("device")
+                .join(holder);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("temp1_input"), millidegrees).unwrap();
+        }
+
         /// `device` is built on `slave`, as LVM, LUKS and MD devices are.
         fn slave(&self, device: &str, slave: &str) {
             let class = self.0.join("class/block");
@@ -541,11 +728,26 @@ mod tests {
     fn disk(name: &str, size: u64, filesystems: u32, used: u64, total: u64) -> DiskSnapshot {
         DiskSnapshot {
             name: name.into(),
+            model: None,
+            kind: kind_of(name),
             size_bytes: size,
             filesystems,
             fs_used_bytes: used,
             fs_total_bytes: total,
             fs_available_bytes: total - used,
+            temp_c: None,
+        }
+    }
+
+    /// What the plain fixture disks are: they hang off no bus, so the name
+    /// alone decides.
+    fn kind_of(name: &str) -> Option<String> {
+        if name.starts_with("nvme") {
+            Some("NVMe SSD".into())
+        } else if name.starts_with("sd") {
+            Some("SCSI disk".into())
+        } else {
+            None
         }
     }
 
@@ -851,8 +1053,196 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_is_described_by_its_model_and_the_bus_it_hangs_off() {
+        let fx = Fixture::new("described");
+        // An NVMe controller reports the whole model, padded with spaces.
+        fx.drive(
+            "pci0/nvme/nvme0/nvme0n1",
+            "259:0",
+            &[
+                ("device/model", "WD_BLACK SN850X 2000GB                  \n"),
+                ("queue/rotational", "0\n"),
+            ],
+        );
+        // SATA: sixteen characters of the model behind the placeholder
+        // vendor every ATA drive has, on a port of the controller.
+        fx.drive(
+            "pci0/ata3/host2/target2:0:0/2:0:0:0/block/sda",
+            "8:0",
+            &[
+                ("device/vendor", "ATA     \n"),
+                ("device/model", "Samsung SSD 870 \n"),
+                ("queue/rotational", "0\n"),
+            ],
+        );
+        fx.drive(
+            "pci0/ata4/host3/target3:0:0/3:0:0:0/block/sdb",
+            "8:16",
+            &[
+                ("device/vendor", "ATA     \n"),
+                ("device/model", "ST4000DM004-2CV1\n"),
+                ("queue/rotational", "1\n"),
+            ],
+        );
+        // SAS: a vendor of its own, behind an end device of the expander.
+        fx.drive(
+            "pci0/host0/port-0:0/end_device-0:0/target0:0:0/0:0:0:0/block/sdc",
+            "8:32",
+            &[
+                ("device/vendor", "SEAGATE \n"),
+                ("device/model", "ST1200MM0009    \n"),
+                ("queue/rotational", "1\n"),
+            ],
+        );
+        // USB: the bridge repeats its vendor in the model, and says the
+        // medium rotates whatever it is.
+        fx.drive(
+            "pci0/usb2/2-1/2-1:1.0/host4/target4:0:0/4:0:0:0/block/sdd",
+            "8:48",
+            &[
+                ("device/vendor", "SanDisk \n"),
+                ("device/model", "SanDisk Ultra   \n"),
+                ("queue/rotational", "1\n"),
+            ],
+        );
+        // A volume of a RAID controller: SCSI and nothing more is known.
+        fx.drive(
+            "pci0/host5/target5:2:0/5:2:0:0/block/sde",
+            "8:64",
+            &[
+                ("device/vendor", "DELL    \n"),
+                ("device/model", "PERC H730 Mini  \n"),
+            ],
+        );
+        // Virtual machines: a virtio disk has no model, and a disk on a
+        // virtio SCSI adapter is still virtual.
+        fx.drive("pci0/virtio1/block/vda", "254:0", &[]);
+        fx.drive(
+            "pci0/virtio2/host6/target6:0:0/6:0:0:1/block/sdf",
+            "8:80",
+            &[
+                ("device/vendor", "QEMU    \n"),
+                ("device/model", "QEMU HARDDISK   \n"),
+                ("queue/rotational", "1\n"),
+            ],
+        );
+        // A memory card has a product name and says what kind of card it is.
+        fx.drive(
+            "pci0/mmc_host/mmc0/mmc0:0001/block/mmcblk0",
+            "179:0",
+            &[("device/name", "SD64G\n"), ("device/type", "SD\n")],
+        );
+
+        let described: Vec<_> = Topology::scan(fx.sys(), "", &|_| None)
+            .disks
+            .into_iter()
+            .map(|disk| {
+                (
+                    disk.name,
+                    disk.model.unwrap_or_default(),
+                    disk.kind.unwrap_or_default(),
+                )
+            })
+            .collect();
+        let expected = [
+            ("mmcblk0", "SD64G", "SD card"),
+            ("nvme0n1", "WD_BLACK SN850X 2000GB", "NVMe SSD"),
+            ("sda", "Samsung SSD 870", "SATA SSD"),
+            ("sdb", "ST4000DM004-2CV1", "SATA HDD"),
+            ("sdc", "SEAGATE ST1200MM0009", "SAS HDD"),
+            ("sdd", "SanDisk Ultra", "USB disk"),
+            ("sde", "DELL PERC H730 Mini", "SCSI disk"),
+            ("sdf", "QEMU HARDDISK", "virtual disk"),
+            ("vda", "", "virtual disk"),
+        ]
+        .map(|(name, model, kind)| (name.to_owned(), model.to_owned(), kind.to_owned()));
+        assert_eq!(described, expected);
+    }
+
+    #[test]
+    fn each_disk_reports_the_temperature_of_its_own_hardware() {
+        let fx = Fixture::new("temperature");
+        // An NVMe controller keeps its sensor beside the namespace. The
+        // reading is thousandths of a degree, converted from whole kelvins.
+        fx.disk("nvme0n1", "259:0", 1000, true);
+        fx.sensor("nvme0n1", "hwmon3", "51850\n");
+        // A namespace behind two controllers hangs off its subsystem, which
+        // links to both; its own block directory there is no controller.
+        fx.disk("nvme1n1", "259:8", 1000, true);
+        fx.sensor("nvme1n1", "nvme1/hwmon5", "40850\n");
+        fx.sensor("nvme1n1", "nvme2/hwmon6", "42850\n");
+        fx.sensor("nvme1n1", "nvme1n1/hwmon7", "99000\n");
+        // drivetemp puts the sensor in a hwmon directory of the SCSI device.
+        fx.disk("sda", "8:0", 1000, true);
+        fx.sensor("sda", "hwmon/hwmon4", "34000\n");
+        // No sensor: a USB stick, a virtual disk, SATA without drivetemp.
+        fx.disk("sdb", "8:16", 1000, true);
+        // Sensors that answer nothing usable: zero kelvin, and no number.
+        fx.disk("sdc", "8:32", 1000, true);
+        fx.sensor("sdc", "hwmon/hwmon8", "-273150\n");
+        fx.disk("sdd", "8:48", 1000, true);
+        fx.sensor("sdd", "hwmon/hwmon9", "\n");
+
+        let mut topology = Topology::scan(fx.sys(), "", &|_| None);
+        // Scanning alone asks no drive: that is what --no-temp leaves.
+        assert!(topology.disks.iter().all(|disk| disk.temp_c.is_none()));
+        topology.read_temperatures(fx.sys());
+        // The readings stay with the disks through every measurement.
+        for _ in 0..2 {
+            let temperatures: Vec<_> = measure(&topology, &[])
+                .into_iter()
+                .map(|disk| (disk.name, disk.temp_c))
+                .collect();
+            assert_eq!(
+                temperatures,
+                [
+                    ("nvme0n1".to_owned(), Some(52)),
+                    ("nvme1n1".to_owned(), Some(43)),
+                    ("sda".to_owned(), Some(34)),
+                    ("sdb".to_owned(), None),
+                    ("sdc".to_owned(), None),
+                    ("sdd".to_owned(), None),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn temperatures_are_whole_degrees_within_what_a_drive_can_be_at() {
+        let fx = Fixture::new("degrees");
+        fx.disk("sda", "8:0", 1000, true);
+        for (millidegrees, degrees) in [
+            ("34499", Some(34)),
+            ("34500", Some(35)),
+            ("0", Some(0)),
+            ("-4500", Some(-4)),
+            ("-5501", Some(-6)),
+            ("150499", Some(150)),
+            ("150500", None),
+            ("-50500", Some(-50)),
+            ("-50501", None),
+            ("warm", None),
+        ] {
+            fx.sensor("sda", "hwmon/hwmon1", millidegrees);
+            assert_eq!(
+                temperature(&fx.sys().join("block/sda")),
+                degrees,
+                "{millidegrees}"
+            );
+        }
+        // Only numbered hwmon and controller directories are looked into.
+        assert!(numbered("hwmon12", "hwmon") && numbered("nvme0", "nvme"));
+        for name in ["hwmon", "hwmonx", "nvme0n1", "nvme", "xhwmon1"] {
+            assert!(
+                !numbered(name, "hwmon") && !numbered(name, "nvme"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn the_running_system_reports_consistent_disks() {
-        let mut probe = Probe::default();
+        let mut probe = Probe::new(true);
         let disks = probe.sample();
         let names: Vec<_> = disks.iter().map(|disk| disk.name.clone()).collect();
         let mut unique = names.clone();
@@ -871,6 +1261,25 @@ mod tests {
             if disk.filesystems == 0 {
                 assert_eq!(disk.fs_total_bytes, 0, "{disk:?}");
             }
+            // What the kernel says of the drive is printed as it stands.
+            for text in [&disk.model, &disk.kind].into_iter().flatten() {
+                assert!(!text.is_empty() && text.trim() == text, "{disk:?}");
+            }
+            assert!(
+                disk.temp_c
+                    .is_none_or(|degrees| PLAUSIBLE_CELSIUS.contains(&i64::from(degrees))),
+                "{disk:?}"
+            );
         }
+        // With temperature probing off the same disks are listed, unasked.
+        let unasked = Probe::new(false).sample();
+        assert_eq!(
+            names,
+            unasked
+                .iter()
+                .map(|disk| disk.name.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(unasked.iter().all(|disk| disk.temp_c.is_none()));
     }
 }

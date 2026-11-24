@@ -222,8 +222,16 @@ fn rows_left_over_by_the_panels_go_to_the_process_table() {
 fn disk_panel_sits_between_the_gpu_panels_and_the_process_table() {
     let mut snap = snapshot(1, 8, 40);
     snap.disks = vec![
-        disk("nvme0n1", 2000, 3, 441, 1740),
-        disk("sda", 500, 1, 120, 465),
+        DiskSnapshot {
+            model: Some("WD_BLACK SN850X 2000GB".into()),
+            kind: Some("NVMe SSD".into()),
+            temp_c: Some(52),
+            ..disk("nvme0n1", 2000, 3, 441, 1740)
+        },
+        DiskSnapshot {
+            kind: Some("SATA HDD".into()),
+            ..disk("sda", 500, 1, 120, 465)
+        },
     ];
     let mut app = AppState {
         top_n: 40,
@@ -231,42 +239,186 @@ fn disk_panel_sits_between_the_gpu_panels_and_the_process_table() {
     };
     let rendered = render(100, 48, &mut app, &snap);
     let rows = rendered.lines().collect::<Vec<_>>();
-    // Header, CPU, RAM/swap and one GPU panel fill rows 0 to 14.
+    // Header, CPU, RAM/swap and one GPU panel fill rows 0 to 14. Each disk
+    // then takes two rows: what the drive is, and how full and warm it is.
     assert!(
         rows[15].starts_with("┌ Disks · 2 physical · 2500 GiB ─"),
         "{rendered}"
     );
     assert!(
-        rows[16].starts_with("│nvme0n1    441 /  1740 GiB  25.3% ["),
+        rows[16]
+            .starts_with("│WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 441 of 1740 GiB used "),
         "{rendered}"
     );
     assert!(
-        rows[17].starts_with("│sda      120.0 / 465.0 GiB  25.8% ["),
+        rows[17].starts_with("│Disk   25.3%   temp: 52°C         ["),
         "{rendered}"
     );
-    assert!(rows[18].starts_with('└'), "{rendered}");
-    assert!(rows[19].contains("Processes 1–24 / 40"), "{rendered}");
-    assert_eq!(app.process_viewport_rows, 24);
-    // Every usage bar starts in the same column, whatever its label.
-    let bars = [3, 7, 12, 13, 16, 17].map(|row| rows[row].chars().position(|c| c == '['));
-    assert_eq!(bars, [Some(35); 6], "{rendered}");
+    assert!(
+        rows[18].starts_with("│SATA HDD · sda | 120.0 of 465.0 GiB used "),
+        "{rendered}"
+    );
+    assert!(
+        rows[19].starts_with("│Disk   25.8%   temp: n/a          ["),
+        "{rendered}"
+    );
+    assert!(rows[20].starts_with('└'), "{rendered}");
+    assert!(rows[21].contains("Processes 1–22 / 40"), "{rendered}");
+    assert_eq!(app.process_viewport_rows, 22);
+    // Every bar starts in the same column and ends at the frame: CPU, RAM,
+    // GPU, VRAM and both disks.
+    for row in [3, 7, 12, 13, 17, 19] {
+        assert_eq!(
+            rows[row].chars().position(|c| c == '['),
+            Some(35),
+            "{rendered}"
+        );
+        assert!(rows[row].ends_with("]│"), "{rendered}");
+    }
 }
 
 #[test]
-fn disks_with_nothing_mounted_show_their_size_without_a_bar() {
+fn a_disk_with_nothing_mounted_says_so_and_has_no_percentage_or_bar() {
     let mut snap = snapshot(0, 8, 2);
-    snap.disks = vec![disk("sda", 465, 1, 120, 450), disk("sdb", 3726, 0, 0, 0)];
+    snap.disks = vec![
+        disk("sda", 465, 1, 120, 450),
+        DiskSnapshot {
+            temp_c: Some(31),
+            ..disk("sdb", 3726, 0, 0, 0)
+        },
+    ];
     let rendered = render(100, 40, &mut AppState::default(), &snap);
-    let row = rendered
-        .lines()
-        .find(|line| line.starts_with("│sdb "))
-        .unwrap();
+    let rows = rendered.lines().collect::<Vec<_>>();
+    let described = rows
+        .iter()
+        .position(|line| line.starts_with("│sdb | no mounted filesystem "))
+        .unwrap_or_else(|| panic!("{rendered}"));
+    // The temperature stays in its column under the disk above.
     assert!(
-        row.starts_with("│sdb       — /  3726 GiB  no mounted filesystem "),
+        rows[described + 1].starts_with("│Disk       —   temp: 31°C "),
         "{rendered}"
     );
-    assert!(!row.contains('['), "{rendered}");
-    assert!(rendered.contains("│sda   120.0 / 450.0 GiB  26.7%    ["));
+    assert!(!rows[described + 1].contains('['), "{rendered}");
+    assert!(rendered.contains("│sda | 120.0 of 450.0 GiB used "));
+    assert!(rendered.contains("│Disk   26.7%   temp: n/a          ["));
+}
+
+#[test]
+fn a_disk_is_shown_in_the_shape_of_the_cpu_and_gpu_panels() {
+    let mut snap = snapshot(1, 8, 2);
+    snap.disks = vec![
+        DiskSnapshot {
+            model: Some("WD_BLACK SN850X 2000GB".into()),
+            kind: Some("NVMe SSD".into()),
+            temp_c: Some(52),
+            ..disk("nvme0n1", 2000, 3, 441, 1740)
+        },
+        DiskSnapshot {
+            model: Some("ST4000DM004-2CV1".into()),
+            kind: Some("SATA HDD".into()),
+            temp_c: Some(-3),
+            ..disk("sda", 3726, 1, 3000, 3600)
+        },
+    ];
+    let mut app = AppState::default();
+    let buffer = render_buffer(100, 48, &mut app, &snap);
+    let rows = buffer_rows(&buffer);
+    let row = |start: &str| {
+        rows.iter()
+            .position(|line| line.starts_with(start))
+            .unwrap_or_else(|| panic!("{start:?} not in\n{}", rows.join("\n")))
+    };
+    let (cpu, gpu) = (row("│CPU "), row("│GPU "));
+    let disks = [row("│Disk   25.3%"), row("│Disk   83.3%")];
+
+    // Above the figures stands what the device is, as the brand strings of
+    // the CPU and GPU do, and the figures row names it by its kind alone.
+    assert!(rows[cpu - 1].starts_with("│Test CPU "));
+    assert!(rows[gpu - 1].starts_with("│RTX Test 0 "));
+    assert!(rows[disks[0] - 1]
+        .starts_with("│WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 441 of 1740 GiB used "));
+    assert!(rows[disks[1] - 1]
+        .starts_with("│ST4000DM004-2CV1 · SATA HDD · sda | 3000 of 3600 GiB used "));
+    assert!(rows[disks[0]].starts_with("│Disk   25.3%   temp: 52°C         ["));
+    assert!(rows[disks[1]].starts_with("│Disk   83.3%   temp: -3°C         ["));
+    assert!(!rows[disks[0]].contains("nvme0n1") && !rows[disks[1]].contains("sda"));
+
+    // The percentage ends in the same column on the CPU and disk rows, and
+    // every bar starts and ends where the CPU and GPU bars do.
+    let column = |line: usize, symbol: char| rows[line].chars().position(|c| c == symbol);
+    assert_eq!(column(disks[0], '%'), column(cpu, '%'));
+    for line in [gpu, disks[0], disks[1]] {
+        assert_eq!(column(line, '['), column(cpu, '['), "{}", rows[line]);
+        assert!(rows[line].ends_with("]│"), "{}", rows[line]);
+    }
+
+    // The same colours on all three: the device line like the brand strings,
+    // the label like every label, the reading in the temperature colour.
+    let colours = |line: usize, text: &str| {
+        let cells = rows[line].chars().collect::<Vec<_>>();
+        let needle = text.chars().collect::<Vec<_>>();
+        let at = cells
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .unwrap_or_else(|| panic!("{text:?} not in {:?}", rows[line]));
+        (at..at + needle.len())
+            .map(|x| buffer[(x as u16, line as u16)].fg)
+            .collect::<Vec<_>>()
+    };
+    let all = |line: usize, text: &str, colour: Color| {
+        assert!(
+            colours(line, text).iter().all(|&fg| fg == colour),
+            "{text:?} in {:?}",
+            rows[line]
+        );
+    };
+    all(cpu - 1, "Test CPU", Color::Gray);
+    all(gpu - 1, "RTX Test 0", Color::Gray);
+    all(
+        disks[0] - 1,
+        "WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1",
+        Color::Gray,
+    );
+    for (line, label, reading) in [
+        (cpu, "CPU", "67.0°C"),
+        (gpu, "GPU", "71°C"),
+        (disks[0], "Disk", "52°C"),
+        (disks[1], "Disk", "-3°C"),
+    ] {
+        all(line, label, Color::Cyan);
+        all(line, "temp", Color::Cyan);
+        all(line, reading, Color::Yellow);
+    }
+}
+
+#[test]
+fn a_disk_without_model_kind_or_sensor_still_has_both_rows() {
+    let mut snap = snapshot(1, 8, 2);
+    snap.disks = vec![disk("vda", 100, 1, 25, 100)];
+    let mut app = AppState::default();
+    let rendered = render(100, 48, &mut app, &snap);
+    // Only the kernel name is known: it heads the disk, and the reading is
+    // n/a as it is for a CPU without a sensor.
+    assert!(
+        rendered.contains("│vda | 25.0 of 100.0 GiB used "),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("│Disk   25.0%   temp: n/a          ["),
+        "{rendered}"
+    );
+    // A long description is cut at the frame; the figures keep their place.
+    snap.disks[0].model = Some("A drive with a remarkably long model name".into());
+    snap.disks[0].kind = Some("virtual disk".into());
+    let narrow = render(50, 48, &mut app, &snap);
+    assert!(
+        narrow.contains("│A drive with a remarkably long model name · vir…│"),
+        "{narrow}"
+    );
+    assert!(
+        narrow.contains("│Disk   25.0%   temp: n/a          [███░░░░░░░░░]│"),
+        "{narrow}"
+    );
 }
 
 #[test]
@@ -295,15 +447,27 @@ fn the_fullest_disks_are_listed_when_rows_run_out() {
         "{rendered}"
     );
     assert_eq!(listed(&rendered), "bdef", "{rendered}");
-    // Thirty rows leave one row for disks beside ten for the process table.
-    let rendered = render(100, 30, &mut app, &snap);
+    // Thirty-one rows leave the two rows of one disk beside ten for the
+    // process table: the fullest disk is the one listed.
+    let rendered = render(100, 31, &mut app, &snap);
     assert!(rendered.contains(" · 1 fullest shown "), "{rendered}");
     assert_eq!(listed(&rendered), "e", "{rendered}");
+    assert!(
+        rendered.contains("│sde | 950 of 1000 GiB used "),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("│Disk   95.0%   temp: n/a "),
+        "{rendered}"
+    );
     assert_eq!(app.process_viewport_rows, 7);
-    // One row fewer and the process table keeps them all.
-    let rendered = render(100, 29, &mut app, &snap);
+    // A second disk needs two more rows.
+    assert_eq!(listed(&render(100, 32, &mut app, &snap)), "e");
+    assert_eq!(listed(&render(100, 33, &mut app, &snap)), "be");
+    // One row fewer than thirty-one and the process table keeps them all.
+    let rendered = render(100, 30, &mut app, &snap);
     assert!(!rendered.contains("Disks"), "{rendered}");
-    assert_eq!(app.process_viewport_rows, 9);
+    assert_eq!(app.process_viewport_rows, 10);
     // Compact and 80x24 layouts never had room for the panel.
     assert!(!render(80, 24, &mut app, &snap).contains("Disks"));
     assert!(!render(80, 12, &mut app, &snap).contains("Disks"));
@@ -313,31 +477,38 @@ fn the_fullest_disks_are_listed_when_rows_run_out() {
 fn capacities_stay_five_columns_wide_across_units() {
     const GIB: u64 = 1 << 30;
     let tenth = GIB / 10;
-    assert_eq!(
-        capacity_pair(Some(164 * tenth), 939 * tenth),
-        " 16.4 /  93.9 GiB"
-    );
-    assert_eq!(
-        capacity_pair(Some(441 * GIB), 1740 * GIB),
-        "  441 /  1740 GiB"
-    );
-    assert_eq!(capacity_pair(None, 3726 * GIB), "    — /  3726 GiB");
+    assert_eq!(capacity_pair(164 * tenth, 939 * tenth), " 16.4 /  93.9 GiB");
+    assert_eq!(capacity_pair(441 * GIB, 1740 * GIB), "  441 /  1740 GiB");
     // The decimal goes exactly where it would need a sixth column.
-    assert_eq!(capacity_pair(Some(0), 9999 * tenth), "  0.0 / 999.9 GiB");
+    assert_eq!(capacity_pair(0, 9999 * tenth), "  0.0 / 999.9 GiB");
+    assert_eq!(capacity_pair(0, 99_996 * GIB / 100), "    0 /  1000 GiB");
     assert_eq!(
-        capacity_pair(Some(0), 99_996 * GIB / 100),
-        "    0 /  1000 GiB"
-    );
-    assert_eq!(
-        capacity_pair(Some(99_999 * GIB), 99_999 * GIB),
+        capacity_pair(99_999 * GIB, 99_999 * GIB),
         "99999 / 99999 GiB"
     );
     assert_eq!(
-        capacity_pair(Some(100_000 * GIB), 200_000 * GIB),
+        capacity_pair(100_000 * GIB, 200_000 * GIB),
         " 97.7 / 195.3 TiB"
     );
     assert_eq!(capacity(1863 * GIB), "1863 GiB");
     assert_eq!(capacity(4658 * tenth), "465.8 GiB");
+    // A disk's sizes are written in the unit and precision of its capacity.
+    let sized = |used: u64, total: u64| {
+        disk_description(&DiskSnapshot {
+            fs_used_bytes: used,
+            fs_total_bytes: total,
+            ..disk("sda", 1, 1, 0, 1)
+        })
+    };
+    assert_eq!(
+        sized(4411 * tenth, 9168 * tenth),
+        "sda | 441.1 of 916.8 GiB used"
+    );
+    assert_eq!(sized(441 * GIB, 1740 * GIB), "sda | 441 of 1740 GiB used");
+    assert_eq!(
+        sized(100_000 * GIB, 200_000 * GIB),
+        "sda | 97.7 of 195.3 TiB used"
+    );
 }
 
 #[test]
@@ -467,7 +638,8 @@ fn snapshot(gpu_count: usize, cores: usize, processes: usize) -> Snapshot {
 }
 
 /// A disk of `size_gib` whose mounted filesystems hold `used_gib` of
-/// `total_gib`.
+/// `total_gib`, of which the kernel knows neither model, kind nor
+/// temperature.
 fn disk(
     name: &str,
     size_gib: u64,
@@ -478,15 +650,28 @@ fn disk(
     const GIB: u64 = 1 << 30;
     DiskSnapshot {
         name: name.into(),
+        model: None,
+        kind: None,
         size_bytes: size_gib * GIB,
         filesystems,
         fs_used_bytes: used_gib * GIB,
         fs_total_bytes: total_gib * GIB,
         fs_available_bytes: (total_gib - used_gib) * GIB,
+        temp_c: None,
     }
 }
 
 fn render(width: u16, height: u16, app: &mut AppState, snap: &Snapshot) -> String {
+    buffer_rows(&render_buffer(width, height, app, snap)).join("\n")
+}
+
+/// The drawn frame with its styles, for checks that the text cannot make.
+fn render_buffer(
+    width: u16,
+    height: u16,
+    app: &mut AppState,
+    snap: &Snapshot,
+) -> ratatui::buffer::Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|f| {
@@ -494,11 +679,13 @@ fn render(width: u16, height: u16, app: &mut AppState, snap: &Snapshot) -> Strin
             draw(f, app, snap);
         })
         .unwrap();
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
     buffer
         .content
-        .chunks(width as usize)
+        .chunks(usize::from(buffer.area.width))
         .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }

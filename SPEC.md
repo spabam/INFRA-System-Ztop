@@ -21,8 +21,8 @@ ZTOP is a compact Linux terminal monitor focused on:
 - RAM and swap used / total / percentage
 - NVIDIA GPU name, utilization, temperature, VRAM used / total / percentage
 - Multi-GPU display, one panel per NVIDIA device
-- Physical disks: raw capacity, and used / total / percentage of the
-  filesystems mounted on each
+- Physical disks: model and kind, raw capacity, used / total / percentage
+  of the filesystems mounted on each, and the drive's temperature
 - Per-process PID, user, CPU%, RAM%, GPU%, VRAM%, and command
 - Top-N process sorting by CPU, RAM, GPU, VRAM, or normalized total score
 - TUI mode with keyboard control and width-responsive layout
@@ -188,6 +188,42 @@ The disk and mount layout is rescanned at most every 5 seconds, because
 reading the mount table costs time in proportion to the number of mounts.
 Usage is read on every collection.
 
+**Model and kind** are read at each layout scan:
+
+1. The model is `/sys/block/<disk>/device/model` (`name` for a memory card),
+   with runs of spaces collapsed. An NVMe controller reports the whole model
+   name, a SCSI device 16 characters. The SCSI `vendor` is put in front unless
+   it is `ATA`, the placeholder of every SATA drive, or the model already
+   starts with it. No udev database is read, so a SATA model stays cut short.
+2. The kind is the bus and the medium. `nvme*` is `NVMe SSD`; `mmcblk*` is
+   `SD card`, `eMMC` or `memory card` by `device/type`. For any other disk the
+   directories between the root of sysfs and the disk tell the bus: a
+   `usb<N>` directory makes it `USB disk`, a `virtio<N>` or `vbd-*` directory
+   `virtual disk`, an `ata<N>` directory `SATA`, an `end_device-*` directory
+   `SAS`, and any other `sd*` disk `SCSI`. SATA, SAS and SCSI are followed by
+   `SSD`, `HDD` or `disk` as `queue/rotational` reads `0`, `1` or nothing.
+3. Either is `null` where the kernel says nothing.
+
+**Temperature** is the hwmon device sysfs lists under the disk's own
+hardware, `/sys/block/<disk>/device`; no `smartctl`, `libsensors`, or SMART
+ioctl, and no privilege:
+
+1. Directly under an NVMe controller: `hwmon<N>/temp1_input`, the Composite
+   temperature. Where `device` is an NVMe subsystem (a namespace reached
+   through several controllers), every `nvme<N>` entry in it is a controller
+   and is looked into the same way.
+2. In the `hwmon` directory of a SCSI device: `hwmon/hwmon<N>/temp1_input`,
+   present for SATA and SAS disks while the `drivetemp` module is loaded.
+   ZTOP does not load modules.
+3. Values are millidegrees Celsius, rounded to whole degrees. A value outside
+   -50..=150 is no reading (a drive that measures nothing reports zero
+   kelvin). Several sensors for one disk yield the highest.
+
+A disk with no such sensor reports `temp_c = null`. Reading the file makes the
+kernel query the drive, so temperatures are read once per layout scan, at most
+every 5 seconds, and repeated in between. `--no-temp` (`show_temperatures =
+false`) skips the readings entirely, as it does for the CPU sensor.
+
 ---
 
 ## 4. Sorting
@@ -312,12 +348,17 @@ Schema 2 changes utilization and temperature to nullable fields; schema 1 client
 must update their readers before consuming these outputs. `cpu_physical_cores`
 was added in 0.9.6 as an additive nullable field without a schema bump.
 
-Disk records contain `name` (kernel device name), `size_bytes` (raw device
-capacity), `filesystems` (mounted filesystems measured on the disk), and
+Disk records contain `name` (kernel device name), `model` and `kind` (the
+drive's model and what sort of drive it is, section 3.3, each `null` when
+unknown), `size_bytes` (raw device
+capacity), `filesystems` (mounted filesystems measured on the disk),
 `fs_used_bytes` / `fs_total_bytes` (the disk's share of their used space and
-capacity, section 3.3). The last two are `0` when `filesystems` is `0`. The
+capacity, section 3.3), `fs_available_bytes`, and `temp_c` (the drive's
+temperature in whole degrees Celsius, `null` without a sensor or with
+`--no-temp`). The byte fields are `0` when `filesystems` is `0`. The
 array is empty where no physical disk can be found. `disks` was added in
-0.9.14 as an additive field without a schema bump.
+0.9.14, `fs_available_bytes` in 0.9.15, `temp_c` in 0.9.16, and `model` and
+`kind` in 0.9.17, each as an additive field without a schema bump.
 
 Process rows contain `pid`, `user`, `cpu_pct`, `ram_pct`, `gpu_pct`,
 `vram_bytes`, and `command`.
@@ -389,23 +430,46 @@ filter, top-N, process-list, or terminal-size changes. Numeric columns expand fo
 long PIDs and large CPU values; truncation respects grapheme/display width.
 Memory units shown in the TUI are GiB/MiB (powers of 1024).
 
-RAM, swap, VRAM, and disk rows share one shape,
-`LABEL  used / total UNIT  pct%  [bar]`, and their bars start in the same
-column. Both numbers are five columns wide: one decimal below 1000 GiB, whole
-GiB below 100000 GiB, and TiB with one decimal beyond.
+RAM, swap, and VRAM rows share one shape,
+`LABEL  used / total UNIT  pct%  [bar]`. Both numbers are five columns wide:
+one decimal below 1000 GiB, whole GiB below 100000 GiB, and TiB with one
+decimal beyond.
 
-The Disks panel sits between the GPU panels and the process table. It has one
-row per physical disk, labelled with the device name, showing the used space
-and capacity of the filesystems mounted on it (section 3.3). A disk with
-`filesystems = 0` shows `— / <device size>` and `no mounted filesystem`
-instead of a percentage and bar. The title is
-` Disks · <n> physical · <total raw capacity> `, falling back to ` Disks `
-when it does not fit.
+CPU, GPU, and disk share another: a line in the brand colour that says what
+the device is, and under it `LABEL  pct%  temp: reading  [bar]`, where the
+label is the generic `CPU`, `GPU`, or `Disk`. Temperatures have one form on
+all three: the label `temp` in the label colour, `: `, and the reading in the
+temperature colour, after the percentage and before the bar. An unavailable
+reading is `n/a`. The CPU reading has one decimal; GPU and disk readings are
+whole degrees.
+
+Every bar starts in the same column, whichever of the two shapes its row has.
+No row may carry so much text that its bar starts further right.
+
+The Disks panel sits between the GPU panels and the process table. It has two
+rows per physical disk:
+
+```text
+WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 441 of 1740 GiB used
+Disk   25.3%   temp: 52°C         [████████░░░░░░░░░░░░░░░░░░░░░░░░]
+```
+
+The first is the model, the kind, and the kernel device name, joined by ` · `
+with whatever is unknown left out, then ` | ` and the used space and capacity
+of the filesystems mounted on the disk (section 3.3) in the unit and
+precision of the capacity. It is cut at the panel's width. The second is
+`Disk`, the percentage (`df`'s Use%), the temperature, and the bar; it never
+carries the device name or the sizes. A disk with `filesystems = 0` reads
+`| no mounted filesystem` in its first row and has `—` for the percentage and
+no bar. A disk without a sensor, and every disk with `--no-temp`, reads
+`temp: n/a`. The title is ` Disks · <n> physical · <total raw capacity> `,
+falling back to ` Disks ` when it does not fit.
 
 The panel ranks last among the panels: after per-core rows, GPU panel count,
-and GPU panel height. It lists at most four disks and appears only while the
+and GPU panel height. It lists at most four disks, two rows each, and appears
+only while the
 process table keeps ten rows, two more than its minimum; compact layouts
-never show it. When there are more disks than rows, the fullest by used
+never show it. When there are more disks than fit, the fullest by used
 fraction are listed, still in name order, disks without a mounted filesystem
 give way first, and the title adds `· <k> fullest shown`.
 
@@ -453,6 +517,8 @@ src/
 - The disk and mount layout is rescanned at most every 5 seconds; between
   scans a collection costs one `stat` and one `statfs` per mounted
   filesystem.
+- Each scan reads one temperature file per physical disk, which is one query
+  to the drive; none is read between scans or with `--no-temp`.
 - Default steady-state budget: target under 1% CPU on an 8-logical-core host
   at 1 Hz.
 
@@ -484,8 +550,15 @@ Manual / hardware:
       inventory/accounting; process GPU% and VRAM render `—`.
 - [ ] `--no-gpu` skips NVML and opens no NVIDIA devices.
 - [ ] Multi-GPU host shows one panel per device and sums process VRAM.
-- [ ] Multi-disk host shows one row per physical disk; a disk with nothing
-      mounted shows its size and `no mounted filesystem`.
+- [ ] Multi-disk host shows two rows per physical disk; a disk with nothing
+      mounted says `no mounted filesystem` and has no percentage or bar.
+- [ ] Each disk's first row names its model and kind as `lsblk -d -o
+      MODEL,TRAN,ROTA` does (a SATA model may be cut to 16 characters).
+- [ ] The bar of every disk starts in the column of the CPU, RAM, GPU and
+      VRAM bars at 80, 100 and wide widths.
+- [ ] NVMe disks show `temp:` matching `smartctl -A`; SATA disks show it
+      once `drivetemp` is loaded and `n/a` before that; `--no-temp` reads
+      `n/a` on every disk.
 - [ ] Terminal resize behaves at 40, 50, 60, 70, 76, 80, 100, and wide widths.
 - [ ] Idle CPU cost is measured and recorded for the release candidate.
 

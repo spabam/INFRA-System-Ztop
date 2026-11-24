@@ -38,9 +38,17 @@ one process row.
   devices are opened.
 - Run on a multi-GPU host; each GPU must have a panel and process VRAM must
   sum across devices.
-- Run on a multi-disk host; each physical disk must have a row whose numbers
-  match `df` for the filesystems on it, and a disk with nothing mounted must
-  show its size and `no mounted filesystem`.
+- Run on a multi-disk host; each physical disk must have two rows whose
+  numbers match `df` for the filesystems on it, a disk with nothing mounted
+  must say `no mounted filesystem`, and every disk's bar must start in the
+  column of the CPU, RAM, GPU and VRAM bars.
+- Compare each disk's model and kind with `lsblk -d -o NAME,MODEL,TRAN,ROTA`
+  on hosts with SATA, SAS, USB and virtual disks; only an NVMe drive has been
+  seen on real hardware.
+- Compare each disk's `temp:` reading with `smartctl -A` for that drive. An
+  NVMe drive must show it without any setup. On a host with SATA or SAS disks,
+  load `drivetemp` and confirm the reading appears at the next five-second
+  scan; before that such a disk must read `temp: n/a`.
 - Resize the terminal through 40, 50, 60, 70, 76, 80, 100, and wide widths.
 - Measure idle CPU at the default 1 s refresh and record host CPU count,
   process count, GPU count, and observed CPU cost.

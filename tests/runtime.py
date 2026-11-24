@@ -56,6 +56,36 @@ class RuntimeTests(unittest.TestCase):
             checked += 1
         self.assertGreater(checked, 0)
 
+    def test_disk_temperatures_are_whole_degrees_or_null_and_follow_no_temp(self):
+        def disks(args):
+            result = subprocess.run([BIN, "--no-config", "--no-gpu", "--json", "--top", "1"] + args,
+                                    capture_output=True, text=True, check=True, timeout=15)
+            return json.loads(result.stdout)["disks"]
+
+        measured = disks([])
+        for disk in measured:
+            # What the drive is: text as the kernel gives it, or null.
+            for field in ("model", "kind"):
+                self.assertIn(field, disk)
+                if disk[field] is not None:
+                    self.assertTrue(disk[field] and disk[field] == disk[field].strip(), disk)
+            reported = Path("/sys/block", disk["name"], "device/model")
+            if reported.is_file() and reported.read_text().split():
+                self.assertIn(" ".join(reported.read_text().split()), disk["model"])
+            self.assertIn("temp_c", disk)
+            if disk["temp_c"] is not None:
+                self.assertIsInstance(disk["temp_c"], int)
+                self.assertTrue(-50 <= disk["temp_c"] <= 150, disk)
+            # The kernel's own sensor for the drive is what the monitor shows.
+            sensors = sorted(Path("/sys/block", disk["name"], "device").glob("hwmon*/temp1_input"))
+            sensors += sorted(Path("/sys/block", disk["name"], "device").glob("hwmon/hwmon*/temp1_input"))
+            if len(sensors) == 1:
+                self.assertIsNotNone(disk["temp_c"], disk)
+                self.assertLessEqual(abs(disk["temp_c"] - int(sensors[0].read_text()) / 1000), 3, disk)
+        unasked = disks(["--no-temp"])
+        self.assertEqual([disk["name"] for disk in unasked], [disk["name"] for disk in measured])
+        self.assertTrue(all(disk["temp_c"] is None for disk in unasked))
+
     def test_filter_matches_exported_processes(self):
         query = "ztop"
         result = subprocess.run(BASE + ["--json", "--filter", query],

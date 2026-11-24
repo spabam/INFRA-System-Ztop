@@ -2,7 +2,7 @@
 
 `ZTOP` is a tool to monitor CPU, RAM, GPU, VRAM and disks in the top/htop style and with modern compatibility to nvidia drivers (it works where btop fails). Written from scratch in Rust. `by Andrea Bodei info@andreabodei.com 2026`.
 
-**Status:** v0.9.15+20261124.0105 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
+**Status:** v0.9.17+20261124.0633 (unreleased development build). See [Versioning](#versioning), [`CHANGELOG.md`](./CHANGELOG.md), and [`SPEC.md`](./SPEC.md) for release history and the current engineering contract.
 
 A simple, clean, real-time Linux system monitor inspired by `btop`, focused on the essential metrics:
 
@@ -13,7 +13,7 @@ A simple, clean, real-time Linux system monitor inspired by `btop`, focused on t
 - Swap usage
 - GPU model, usage and temperature
 - VRAM usage
-- Disk capacity and usage, per physical disk
+- Disk capacity, usage and temperature, per physical disk
 - Top 10 most resource-consuming commands
 - User running each command
 
@@ -55,8 +55,10 @@ Conceptual layout (the actual render adds horizontal bars and a footer with live
 │ GPU      73%   Temp: 71°C                                       │
 │ VRAM     9.2 / 12.0 GB     76%                                  │
 ├ Disks · 2 physical · 2794 GiB ──────────────────────────────────┤
-│ nvme0n1  441 / 1740 GiB    25%                                  │
-│ sda      612.4 / 916.8 GiB 67%                                  │
+│ WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1                     │
+│ Disk     25%   Temp: 52°C                                       │
+│ Samsung SSD 870 · SATA SSD · sda                                │
+│ Disk     67%   Temp: 34°C                                       │
 ├──────────────────── Top 10 Consuming Commands ──────────────────┤
 │ PID     USER       CPU%   RAM%   GPU%   VRAM%    COMMAND        │
 │ 8123    giaime     188    12.1   65     65.0     python train.py │
@@ -69,7 +71,7 @@ The header shows the running version right next to the `ZTOP` title (e.g. `ZTOP 
 
 The CPU panel title carries the physical core and logical CPU (thread) counts, e.g. ` CPU · 12 cores / 14 threads `, directly above the CPU model line. On platforms that hide the physical topology (some containers and virtual machines) only the thread count is shown. The title carries no key hints: press `C` to hide or show the per-core rows, as listed in the `?` help overlay. The compact short-terminal summary carries the same counts.
 
-The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. A Disks panel follows the GPU panels when the terminal is tall enough for it and at least ten process-table rows (about 30 rows on a typical host); it lists up to four physical disks. Rows the panels leave over go to the process table.
+The layout adapts to terminal height as well as width. It reserves space for processes, automatically collapses core details, and pages GPU panels when necessary. `C` toggles core details; `{` / `}` change GPU pages. A Disks panel follows the GPU panels when the terminal is tall enough for it and at least ten process-table rows (about 31 rows on a typical host); it lists up to four physical disks, two rows each. Rows the panels leave over go to the process table.
 
 Per-core layout automatically uses the available terminal width, so wide terminals pack more cores per row and high-core-count servers need fewer CPU-panel rows. The process table drops columns as the terminal narrows (VRAM below 76 cols, GPU% below 70, USER below 60).
 
@@ -107,23 +109,30 @@ The scheme works on any 256-color or truecolor terminal; on a strictly 16-color 
 
 ### Disks
 
-The Disks panel has one row per **physical disk**, in the same shape as the RAM row:
+The Disks panel shows each **physical disk** in the shape of the CPU and GPU panels: a line that says what the drive is, and under it a line named `Disk` with how full it is, its temperature and a bar that starts in the same column as every other bar:
 
 ```text
 ┌ Disks · 2 physical · 2794 GiB ───────────────────────────────────────────────┐
-│nvme0n1    441 /  1740 GiB  25.4% [███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]│
-│sda      612.4 / 916.8 GiB  66.8% [████████████████████████████░░░░░░░░░░░░░░]│
+│WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 441 of 1740 GiB used            │
+│Disk   25.4%   temp: 52°C         [███████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]│
+│Samsung SSD 870 · SATA SSD · sda | 612.4 of 916.8 GiB used                    │
+│Disk   66.8%   temp: 34°C         [████████████████████████████░░░░░░░░░░░░░░]│
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - The title counts the physical disks and adds up their raw capacity, as `lsblk` reports it.
-- Each row shows the used space and capacity of the **filesystems mounted on that disk**, as `df` reports them, added together. The percentage is `df`'s `Use%`: used space out of what is used or still available, leaving out the blocks a filesystem reserves for root. A full filesystem therefore reads 100 %. The capacity is smaller than the raw disk: swap, unmounted partitions and filesystem overhead are not filesystem space.
-- Filesystems are followed down to the disk through partitions, LVM, LUKS and MD RAID. Each disk of an MD RAID 1 mirror holds the whole filesystem, so both rows show what `df` reports rather than half of it. Any other filesystem that spans several disks (LVM, striped or parity RAID, btrfs) is divided between them in proportion to the space it occupies on each, so those rows add up to what `df` reports.
-- A disk with nothing mounted shows its size and `no mounted filesystem`.
+- The first line names the drive as the CPU and GPU panels name theirs: the model the drive reports, its kind (`NVMe SSD`, `SATA SSD`, `SATA HDD`, `SAS HDD`, `USB disk`, `SD card`, `eMMC`, `virtual disk`), and the kernel's device name, which tells two drives of one model apart. A SATA drive tells the kernel only the first 16 characters of its model. What the kernel does not know is left out, down to the device name alone.
+- After the `|` come the used space and the capacity of the **filesystems mounted on that disk**, as `df` reports them, added together. The capacity is smaller than the raw disk: swap, unmounted partitions and filesystem overhead are not filesystem space.
+- The second line is `Disk`, the percentage, the temperature and the bar. The percentage is `df`'s `Use%`: used space out of what is used or still available, leaving out the blocks a filesystem reserves for root. A full filesystem therefore reads 100 %.
+- Filesystems are followed down to the disk through partitions, LVM, LUKS and MD RAID. Each disk of an MD RAID 1 mirror holds the whole filesystem, so both disks show what `df` reports rather than half of it. Any other filesystem that spans several disks (LVM, striped or parity RAID, btrfs) is divided between them in proportion to the space it occupies on each, so those disks add up to what `df` reports.
+- A disk with nothing mounted says `no mounted filesystem` in its first line and has no percentage or bar; its temperature is still shown.
 - Loop devices, zram, optical drives, network filesystems and overlays are not disks and are not counted. ZFS pools are not attributed to their disks; their member disks show `no mounted filesystem`.
-- When there are more disks than rows, the fullest ones are listed and the title says so.
+- When there are more disks than fit, the fullest ones are listed and the title says so.
+- `temp: 52°C` is the drive's own temperature in whole degrees, with the label and colours of the CPU and GPU readings. It comes from the sensor the kernel exposes for the drive. Every NVMe drive has one. A SATA or SAS drive has one while the kernel module `drivetemp` is loaded; ZTOP loads no modules, so load it once with `sudo modprobe drivetemp` and keep it across restarts with `echo drivetemp | sudo tee /etc/modules-load.d/drivetemp.conf`. USB bridges, memory cards and virtual disks have no sensor.
+- A disk without a sensor reads `temp: n/a`, as a CPU without one does, and so does every disk with `--no-temp`.
+- A reading is a query to the drive, so it is taken when the disk layout is rescanned, every five seconds, and not on every refresh. Some hard disks count such a query as activity and do not spin down while they are polled; `--no-temp` turns the readings off.
 
-Capacities are in GiB with one decimal below 1000 GiB, whole GiB above that, and TiB from 100000 GiB, so every bar starts in the same column.
+RAM, swap and VRAM capacities are in GiB with one decimal below 1000 GiB, whole GiB above that, and TiB from 100000 GiB, so every bar starts in the same column, the bar of each disk included.
 
 ### GPU Metrics
 
@@ -419,7 +428,7 @@ ztop --no-pid-gpu
 
 The NVIDIA driver may still open `/dev/nvidia-uvm` during NVML initialization or device telemetry, so `--no-pid-gpu` does not guarantee that ZTOP disappears from `lsof /dev/nvidia*`. Use `--no-gpu` when NVML initialization and GPU device access must be avoided.
 
-Disable temperature probing:
+Disable temperature probing (the CPU sensor and the disk drives; the GPU reading comes with NVML's device sample):
 
 ```bash
 ztop --no-temp
@@ -449,11 +458,15 @@ CPU/RAM/GPU fields ending in `_pct` are percentages, temperatures are Celsius,
 and `sampled_at_unix_ms` is a UTC Unix timestamp in milliseconds.
 `cpu_physical_cores` is the physical core count, or `null` when the platform
 hides it; the thread (logical CPU) count is the length of `cpu_per_core_pct`.
-`disks` lists every physical disk with its `name`, raw `size_bytes`, the number
+`disks` lists every physical disk with its `name`, its `model` and `kind`
+(such as `NVMe SSD`; each `null` when the kernel does not say), raw
+`size_bytes`, the number
 of mounted `filesystems` measured on it, and their `fs_used_bytes`,
 `fs_total_bytes` and `fs_available_bytes` (all zero when nothing on the disk is
 mounted). Each disk of an MD RAID 1 mirror reports the whole filesystem; other
-filesystems on several disks are split between them.
+filesystems on several disks are split between them. `temp_c` is the drive's
+temperature in whole degrees Celsius, or `null` when the kernel exposes no
+sensor for the disk and with `--no-temp`.
 Per-PID GPU maps are internal and are intentionally omitted from JSON. Backward-incompatible
 JSON changes will bump `schema_version`. GPU records include a stable `id` and NVML `index`, a `status` (`fresh`, `stale`, or `unavailable`), and the time of their last observation. GPU utilization and temperature are `null` when unavailable; memory fields on stale/unavailable devices describe the last observation.
 
@@ -601,6 +614,17 @@ ZTOP reads the kernel directly, with no `lsblk` or `df` at run time:
 
 The disk and mount layout is rescanned every five seconds; usage is read on every refresh.
 
+The model is the `model` file of the disk's hardware in sysfs (`name` for a memory card), with the SCSI `vendor` in front unless it is the `ATA` placeholder of SATA drives. The kind is read from where the disk sits in the sysfs device tree (behind an `ata` port, a SAS end device, a `usb` bus or a `virtio` device) and from `queue/rotational`.
+
+### Disk Temperature
+
+Each scan also reads the drive's temperature from the hwmon device sysfs lists under the disk's own hardware, `/sys/block/<disk>/device`:
+
+1. An NVMe controller holds it directly (`hwmon<N>/temp1_input`, the Composite temperature that SMART reports). A namespace reached through several controllers is looked up through each controller its subsystem links to.
+2. A SATA or SAS disk holds it in `hwmon/hwmon<N>/temp1_input` while the `drivetemp` module is loaded.
+
+Readings are thousandths of a degree and are rounded to whole degrees. A value outside -50 to 150 °C is treated as no reading: a drive that measures nothing reports zero kelvin. No SMART command is sent by ZTOP itself and no privilege is needed.
+
 ### NVIDIA GPU
 
 Use NVIDIA Management Library:
@@ -672,8 +696,8 @@ selects an explicit file and reports an error if it cannot be read.
 
 Implemented since the MVP: multi-GPU support, JSON output / headless snapshot
 mode (`--json`), the configuration file, quiet-by-default GPU diagnostics with
-`--verbose` detail mode, the per-disk usage panel, and rendering/JSON/collector
-regression tests.
+`--verbose` detail mode, the per-disk usage panel with drive temperatures, and
+rendering/JSON/collector regression tests.
 
 Possible features for later versions:
 
@@ -779,8 +803,8 @@ publishing. Ordinary development edits do not require a new release number.
 ## Project Status
 
 The current development version is listed in **Status** above and reported by
-`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, per-disk usage,
-process filtering and scrolling, config overrides, one-shot JSON, and JSON
+`ztop --version`. CPU/RAM/swap, NVIDIA multi-GPU telemetry, per-disk usage and
+temperature, process filtering and scrolling, config overrides, one-shot JSON, and JSON
 streaming are implemented. The memory-management companion is separately enabled
 and defaults to preview mode. See [`RELEASE.md`](./RELEASE.md) for remaining
 hardware qualification before a public release.

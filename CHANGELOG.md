@@ -9,6 +9,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.17+20261124.0633] — 2026-11-24
+
+### Changed
+
+- The Disks panel shows each disk as the CPU and GPU panels show theirs: a
+  line that says what the drive is, and under it a line named `Disk` with the
+  percentage, the temperature and the bar.
+
+  ```text
+  WD_BLACK SN850X 2000GB · NVMe SSD · nvme0n1 | 372 of 1740 GiB used
+  Disk   22.5%   temp: 53°C         [██████████████░░░░░░░░░░░░░░░░░░░]
+  ```
+
+- The bar of a disk starts in the same column as the CPU, RAM, swap, GPU and
+  VRAM bars again. 0.9.16 had put the temperature and the sizes in front of
+  it, which pushed the disk bars to the right of all the others.
+- The figures line no longer carries the device name or the sizes. The first
+  line has them: the kernel name after the model and kind, and after a `|`
+  the used space and capacity of the mounted filesystems.
+- Every disk has a temperature field, `temp: n/a` without a sensor and with
+  `--no-temp`, as the CPU row has. The column that came and went in 0.9.16
+  is gone.
+- A listed disk takes two rows. The panel still lists at most four disks and
+  still appears only while the process table keeps ten rows, which on a
+  typical host is now a terminal of 31 rows instead of 30.
+
+### Added
+
+- The model of a drive, as the drive reports it, and its kind: `NVMe SSD`,
+  `SATA SSD`, `SATA HDD`, `SAS SSD`, `SAS HDD`, `SCSI disk`, `USB disk`,
+  `SD card`, `eMMC` or `virtual disk`. Both come from sysfs alone: the
+  `model` and `vendor` of the disk's hardware, the buses on the way to it in
+  the device tree, and `queue/rotational`. A SATA drive gives the kernel only
+  the first 16 characters of its model.
+- JSON disk records carry `model` and `kind`, each `null` when unknown. The
+  fields are additive; the schema version stays 2.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  in debug and release (90 tests), `tests/runtime.py` against the release
+  binary, the installer fixture tests, `shellcheck` and the version checks.
+- Fixtures cover the model and kind of NVMe, SATA SSD and HDD, SAS, USB,
+  RAID-volume, virtio, virtio-SCSI and memory-card disks. On real hardware
+  only one NVMe drive was available: it read `WD_BLACK SN850X 2000GB · NVMe
+  SSD`, as `lsblk -d -o MODEL,TRAN` does.
+- A test compares the column of the first bar cell on the CPU, RAM, GPU,
+  VRAM and disk rows, and the colours of the device line, the label and the
+  reading on the CPU, GPU and disk rows.
+
+## [0.9.16+20261124.0606] — 2026-11-24
+
+### Added
+
+- Disk rows show the drive's temperature in the form of the CPU and GPU
+  readings, after the percentage and before the bar, with the same label and
+  colours: `nvme0n1    372 /  1740 GiB  22.6%  temp: 53°C  [bar]`.
+- The reading is the hwmon sensor the kernel lists under the disk's own
+  hardware: every NVMe drive (the Composite temperature SMART reports), and
+  SATA or SAS drives while the `drivetemp` module is loaded. ZTOP sends no
+  SMART command of its own, needs no privilege, and loads no module. Values
+  are whole degrees; anything outside -50 to 150 °C counts as no reading.
+- A disk without a sensor reads `temp: n/a` beside disks that have one. A row
+  with no mounted filesystem keeps the reading in its column and starts its
+  note where the bars start.
+- JSON disk records carry `temp_c`, `null` without a sensor. The field is
+  additive; the schema version stays 2.
+
+### Changed
+
+- `--no-temp` and `show_temperatures = false` skip the disk readings as well
+  as the CPU sensor.
+- The bars of the Disks panel start together to the right of the other
+  panels' bars while the panel shows temperatures. With no reading to show
+  (no sensor on any listed disk, `--no-temp`, or a panel too narrow for the
+  reading and a bar after it) the rows and their bars are as in 0.9.15.
+- A reading makes the kernel query the drive, so temperatures are read once
+  per disk-layout scan, every five seconds, not on every refresh.
+
+### Validation
+
+- Rust 1.88: `cargo fmt --check`, clippy with `-D warnings`, and `cargo test`
+  in debug and release (89 tests), `tests/runtime.py` against the release
+  binary, the installer fixture tests, `shellcheck` and the version checks.
+- Sensor layouts covered by fixtures: an NVMe controller, a namespace behind
+  two controllers of one subsystem, a SATA disk with `drivetemp`, a disk
+  without a sensor, and sensors that answer zero kelvin or nothing.
+- On a laptop with one NVMe drive the row read 53 °C while `smartctl -A`
+  reported 53 Celsius; `--no-temp` gave `temp_c: null` and no column. No SATA
+  disk was available: the `drivetemp` path is verified against fixtures only.
+
 ## [0.9.15+20261124.0105] — 2026-11-24
 
 ### Fixed

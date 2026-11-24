@@ -138,7 +138,7 @@ impl Collector {
             gpu_sample_interval: Duration::from_millis(250),
             last_gpu_sample: None,
             temp: (!cli.no_temp).then(temp::CpuTempReader::new),
-            disks: disk::Probe::default(),
+            disks: disk::Probe::new(!cli.no_temp),
             cpu_physical_cores: cpu::physical_count(),
             cmd_cache: HashMap::new(),
         })
@@ -407,7 +407,7 @@ mod tests {
             gpu_sample_interval: Duration::from_millis(250),
             last_gpu_sample: None,
             temp: None,
-            disks: super::disk::Probe::default(),
+            disks: super::disk::Probe::new(false),
             cpu_physical_cores: None,
             cmd_cache: HashMap::new(),
         }
@@ -662,11 +662,14 @@ mod tests {
             gpus: vec![gpu],
             disks: vec![DiskSnapshot {
                 name: "nvme0n1".into(),
+                model: Some("WD_BLACK SN850X 2000GB".into()),
+                kind: Some("NVMe SSD".into()),
                 size_bytes: 2_000,
                 filesystems: 3,
                 fs_used_bytes: 400,
                 fs_total_bytes: 1_800,
                 fs_available_bytes: 1_300,
+                temp_c: Some(52),
             }],
             procs: Vec::new(),
         };
@@ -686,11 +689,14 @@ mod tests {
             json["disks"][0],
             serde_json::json!({
                 "name": "nvme0n1",
+                "model": "WD_BLACK SN850X 2000GB",
+                "kind": "NVMe SSD",
                 "size_bytes": 2_000,
                 "filesystems": 3,
                 "fs_used_bytes": 400,
                 "fs_total_bytes": 1_800,
                 "fs_available_bytes": 1_300,
+                "temp_c": 52,
             })
         );
     }
