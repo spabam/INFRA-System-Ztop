@@ -666,6 +666,7 @@ mod tests {
                 filesystems: 3,
                 fs_used_bytes: 400,
                 fs_total_bytes: 1_800,
+                fs_available_bytes: 1_300,
             }],
             procs: Vec::new(),
         };
@@ -689,6 +690,7 @@ mod tests {
                 "filesystems": 3,
                 "fs_used_bytes": 400,
                 "fs_total_bytes": 1_800,
+                "fs_available_bytes": 1_300,
             })
         );
     }

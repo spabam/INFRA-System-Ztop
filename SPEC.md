@@ -166,16 +166,19 @@ block devices count:
 **Attribution** walks sysfs from the block device to the disks under it: a
 partition belongs to its parent device, and a device with entries in `slaves`
 (LVM, LUKS, MD RAID) rests on those, to at most eight levels. Devices that end
-on no physical disk (loop images, zram) are not counted. A filesystem on
-several disks is divided between them in proportion to the size of the
-partition or device it occupies on each; this holds for every RAID level, so
-per-disk numbers are shares that add up to the filesystem's totals rather than
-physical occupancy.
+on no physical disk (loop images, zram) are not counted. Every member of an
+MD RAID 1 array (`md/level` reads `raid1`) holds all of what the array holds,
+so each disk of a mirror reports the whole filesystem, as `df` does. Anything
+else on several devices (LVM, a stripe, a parity array, btrfs) is divided
+between them in proportion to their sizes, so those per-disk numbers are
+shares that add up to the filesystem's totals rather than physical occupancy.
 
 **Usage** is `statfs(2)` on one mount point per filesystem, however often it
 is mounted: capacity `f_blocks * f_frsize` and used
-`(f_blocks - f_bfree) * f_frsize`, the Size and Used columns of `df`. Blocks
-reserved for root count as free. A mount point is used only if `stat(2)` still
+`(f_blocks - f_bfree) * f_frsize`, the Size and Used columns of `df`, and
+available `f_bavail * f_frsize`, its Avail column, which leaves out the blocks
+reserved for root. The percentage shown is `df`'s Use%,
+`used / (used + available)`. A mount point is used only if `stat(2)` still
 reports the filesystem's device number there (not checked for btrfs, whose
 subvolumes have numbers of their own); otherwise the next mount point of the
 same filesystem is tried. A disk with no measurable filesystem reports

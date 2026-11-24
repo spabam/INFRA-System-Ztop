@@ -327,8 +327,19 @@ fn usage_line(
     total: u64,
     area: Rect,
 ) -> Line<'static> {
-    let label = label.into();
     let pct = used as f64 / total.max(1) as f64 * 100.0;
+    usage_line_at(label, used, total, pct, area)
+}
+
+/// [`usage_line`] with a percentage that is not simply `used / total`.
+fn usage_line_at(
+    label: impl Into<Cow<'static, str>>,
+    used: u64,
+    total: u64,
+    pct: f64,
+    area: Rect,
+) -> Line<'static> {
+    let label = label.into();
     let text = format!("  {} {pct:5.1}%", capacity_pair(Some(used), total));
     let prefix_width = label.width() + text.width();
     let mut spans = vec![Span::styled(label, LABEL), Span::raw(text)];
@@ -508,7 +519,7 @@ fn fullest_disks(disks: &[DiskSnapshot], rows: usize) -> Vec<&DiskSnapshot> {
     if picked.len() > rows {
         let fullness = |disk: &DiskSnapshot| match disk.filesystems {
             0 => -1.0,
-            _ => disk.fs_used_bytes as f64 / disk.fs_total_bytes.max(1) as f64,
+            _ => disk_used_pct(disk),
         };
         // The sort is stable: equally full disks keep their name order.
         picked.sort_by(|&a, &b| fullness(&disks[b]).total_cmp(&fullness(&disks[a])));
@@ -516,6 +527,15 @@ fn fullest_disks(disks: &[DiskSnapshot], rows: usize) -> Vec<&DiskSnapshot> {
         picked.sort_unstable();
     }
     picked.into_iter().map(|index| &disks[index]).collect()
+}
+
+/// How full a disk's filesystems are, as `df` counts "Use%": used space out
+/// of what is used or still available to an unprivileged user. The blocks a
+/// filesystem reserves for root are in its capacity but in neither of those,
+/// so this is a little above `used / total`.
+fn disk_used_pct(disk: &DiskSnapshot) -> f64 {
+    let usable = disk.fs_used_bytes.saturating_add(disk.fs_available_bytes);
+    disk.fs_used_bytes as f64 / usable.max(1) as f64 * 100.0
 }
 
 /// Disk panel title: the hardware, ` Disks · 2 physical · 2794 GiB `, with a
@@ -556,7 +576,13 @@ fn draw_disks(f: &mut Frame, area: Rect, disks: &[DiskSnapshot]) {
                     Span::raw(format!("  {size}  no mounted filesystem")),
                 ])
             } else {
-                usage_line(label, disk.fs_used_bytes, disk.fs_total_bytes, area)
+                usage_line_at(
+                    label,
+                    disk.fs_used_bytes,
+                    disk.fs_total_bytes,
+                    disk_used_pct(disk),
+                    area,
+                )
             }
         })
         .collect::<Vec<_>>();

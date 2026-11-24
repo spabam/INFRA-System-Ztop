@@ -38,8 +38,9 @@ JSON output:
   cpu_physical_cores is the physical core count (null when the host hides it);
   the thread count is the length of cpu_per_core_pct.
   disks lists each physical disk: name, size_bytes (the raw device), the
-  number of mounted filesystems measured on it, and its share of their
-  fs_used_bytes and fs_total_bytes.
+  number of mounted filesystems measured on it, and their fs_used_bytes,
+  fs_total_bytes and fs_available_bytes. Each disk of an MD RAID 1 mirror
+  reports the whole filesystem.
 
 Configuration file (optional):
   ~/.config/ztop/config.toml is read at startup ($XDG_CONFIG_HOME honored).

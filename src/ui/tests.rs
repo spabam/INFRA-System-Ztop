@@ -482,6 +482,7 @@ fn disk(
         filesystems,
         fs_used_bytes: used_gib * GIB,
         fs_total_bytes: total_gib * GIB,
+        fs_available_bytes: (total_gib - used_gib) * GIB,
     }
 }
 

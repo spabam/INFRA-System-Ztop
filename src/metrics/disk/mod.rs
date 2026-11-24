@@ -17,11 +17,15 @@ pub struct DiskSnapshot {
     /// Mounted filesystems measured on this disk. Zero means nothing on it is
     /// mounted, and then the two fields below are zero as well.
     pub filesystems: u32,
-    /// This disk's share of the used space and capacity of those filesystems.
-    /// A filesystem that spans several disks is split between them in
-    /// proportion to the space it occupies on each.
+    /// The used space and capacity of those filesystems, as `df` reports
+    /// them. Each disk of an MD RAID 1 mirror holds the whole filesystem and
+    /// reports all of it; any other filesystem that spans several disks is
+    /// split between them in proportion to the space it occupies on each.
     pub fs_used_bytes: u64,
     pub fs_total_bytes: u64,
+    /// What an unprivileged user can still write to those filesystems: free
+    /// space less the blocks reserved for root, `df`'s "Avail".
+    pub fs_available_bytes: u64,
 }
 
 /// Samples every physical disk, in device-name order.

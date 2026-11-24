@@ -4,7 +4,9 @@
 //! `/sys/block` names the disks and `/proc/self/mountinfo` the mounted
 //! filesystems. sysfs then leads from each filesystem's block device down to
 //! the disks underneath it: through partitions, and through the `slaves` of
-//! device-mapper (LVM, LUKS) and MD RAID devices.
+//! device-mapper (LVM, LUKS) and MD RAID devices. Each disk of an MD RAID 1
+//! mirror holds the whole filesystem; any other filesystem on several disks
+//! is divided between them.
 
 use std::{
     collections::BTreeMap,
@@ -47,6 +49,7 @@ struct Mount {
 struct Usage {
     total_bytes: u64,
     used_bytes: u64,
+    available_bytes: u64,
 }
 
 /// Samples the disks, remembering between samples where each filesystem lives.
@@ -81,8 +84,10 @@ struct Topology {
 struct Filesystem {
     /// Every place it is mounted.
     mounts: Vec<Mount>,
-    /// `(index into disks, bytes it occupies there)`; never all zero.
-    shares: Vec<(usize, u64)>,
+    /// `(index into disks, fraction of the filesystem held there)`; never
+    /// empty. The fractions add up to 1 unless a mirror repeats the data: each
+    /// disk of a mirror holds all of it.
+    shares: Vec<(usize, f64)>,
 }
 
 impl Topology {
@@ -110,24 +115,23 @@ impl Topology {
             .into_iter()
             .filter_map(|(devices, mounts)| {
                 let mut reached = Vec::new();
-                for device in &devices {
-                    disk_shares(sys, device, MAX_STACK_DEPTH, &mut reached);
+                for (device, fraction) in divide(sys, &devices, 1.0) {
+                    disk_shares(sys, &device, MAX_STACK_DEPTH, fraction, &mut reached);
                 }
-                let mut shares: Vec<(usize, u64)> = Vec::new();
-                for (name, bytes) in reached {
+                let mut shares: Vec<(usize, f64)> = Vec::new();
+                for (name, fraction) in reached {
                     // Loop devices, zram and the like end on no physical disk.
                     let Some(disk) = disks.iter().position(|disk| disk.name == name) else {
                         continue;
                     };
                     match shares.iter_mut().find(|(index, _)| *index == disk) {
-                        Some(share) => share.1 += bytes,
-                        None => shares.push((disk, bytes)),
+                        // A disk cannot hold more than the whole filesystem,
+                        // even with both halves of a mirror on it.
+                        Some(share) => share.1 = (share.1 + fraction).min(1.0),
+                        None => shares.push((disk, fraction)),
                     }
                 }
-                shares
-                    .iter()
-                    .any(|(_, bytes)| *bytes > 0)
-                    .then_some(Filesystem { mounts, shares })
+                (!shares.is_empty()).then_some(Filesystem { mounts, shares })
             })
             .collect();
         Self { disks, filesystems }
@@ -141,17 +145,21 @@ impl Topology {
             let Some(usage) = filesystem.mounts.iter().find_map(usage) else {
                 continue;
             };
-            let occupied: u128 = filesystem
-                .shares
-                .iter()
-                .map(|(_, bytes)| u128::from(*bytes))
-                .sum();
-            for &(disk, bytes) in &filesystem.shares {
-                let share = |whole: u64| (u128::from(whole) * u128::from(bytes) / occupied) as u64;
+            for &(disk, fraction) in &filesystem.shares {
+                let share = |whole: u64| {
+                    if fraction >= 1.0 {
+                        whole
+                    } else {
+                        (whole as f64 * fraction) as u64
+                    }
+                };
                 let disk = &mut disks[disk];
                 disk.filesystems += 1;
                 disk.fs_total_bytes = disk.fs_total_bytes.saturating_add(share(usage.total_bytes));
                 disk.fs_used_bytes = disk.fs_used_bytes.saturating_add(share(usage.used_bytes));
+                disk.fs_available_bytes = disk
+                    .fs_available_bytes
+                    .saturating_add(share(usage.available_bytes));
             }
         }
         disks
@@ -185,6 +193,7 @@ fn physical_disks(sys: &Path) -> Vec<DiskSnapshot> {
                 filesystems: 0,
                 fs_used_bytes: 0,
                 fs_total_bytes: 0,
+                fs_available_bytes: 0,
             })
         })
         .collect();
@@ -227,11 +236,18 @@ fn btrfs_members(sys: &Path, member: String) -> Vec<String> {
         .unwrap_or_else(|| vec![member])
 }
 
-/// Appends `(disk, bytes)` for each place `device` comes to rest on a whole
-/// device with nothing underneath it. `bytes` is the size of the partition,
-/// or of the whole device, that it occupies there; a filesystem's numbers
-/// are divided between its disks in that proportion.
-fn disk_shares(sys: &Path, device: &str, depth: u8, shares: &mut Vec<(String, u64)>) {
+/// Appends `(disk, fraction)` for each place `device` comes to rest on a whole
+/// device with nothing underneath it, where `fraction` is how much of the
+/// filesystem that place holds. Every member of an MD RAID 1 mirror holds all
+/// of what the array holds; the members of anything else (LVM, a stripe, a
+/// parity array) divide it between them.
+fn disk_shares(
+    sys: &Path,
+    device: &str,
+    depth: u8,
+    fraction: f64,
+    shares: &mut Vec<(String, f64)>,
+) {
     let class = sys.join("class/block");
     let node = class.join(device);
     let whole = if node.join("partition").exists() {
@@ -252,12 +268,42 @@ fn disk_shares(sys: &Path, device: &str, depth: u8, shares: &mut Vec<(String, u6
         entry_names(&class.join(&whole).join("slaves"))
     };
     if slaves.is_empty() {
-        shares.push((whole, sectors(&node) * SECTOR_BYTES));
-    } else {
-        for slave in slaves {
-            disk_shares(sys, &slave, depth - 1, shares);
-        }
+        shares.push((whole, fraction));
+        return;
     }
+    let mirror = fs::read_to_string(class.join(&whole).join("md/level"))
+        .is_ok_and(|level| level.trim() == "raid1");
+    let members = if mirror {
+        slaves.into_iter().map(|slave| (slave, fraction)).collect()
+    } else {
+        divide(sys, &slaves, fraction)
+    };
+    for (slave, fraction) in members {
+        disk_shares(sys, &slave, depth - 1, fraction, shares);
+    }
+}
+
+/// Divides `fraction` between `devices` in proportion to their sizes, or
+/// evenly when sysfs gives none of them a size.
+fn divide(sys: &Path, devices: &[String], fraction: f64) -> Vec<(String, f64)> {
+    let class = sys.join("class/block");
+    let sizes: Vec<u64> = devices
+        .iter()
+        .map(|device| sectors(&class.join(device)))
+        .collect();
+    let total: u64 = sizes.iter().sum();
+    devices
+        .iter()
+        .zip(sizes)
+        .map(|(device, size)| {
+            let part = if total == 0 {
+                1.0 / devices.len() as f64
+            } else {
+                size as f64 / total as f64
+            };
+            (device.clone(), fraction * part)
+        })
+        .collect()
 }
 
 fn device_name(sys: &Path, (major, minor): DeviceNumber) -> Option<String> {
@@ -349,9 +395,10 @@ fn device_number(path: &Path) -> Option<DeviceNumber> {
         .then(|| (libc::major(meta.rdev()), libc::minor(meta.rdev())))
 }
 
-/// Capacity and used space of the filesystem mounted at `mount`, as `df`
-/// counts them: used is every block that is not free. Blocks reserved for
-/// root count as free until something is written to them.
+/// Capacity, used and available space of the filesystem mounted at `mount`,
+/// as `df` counts them: used is every block that is not free, and available
+/// is what an unprivileged user can still write, which leaves out the blocks
+/// reserved for root.
 fn usage(mount: &Mount) -> Option<Usage> {
     // Another mount may cover this mount point. A filesystem named after its
     // block device reports that number for its files too, so check that the
@@ -387,6 +434,7 @@ fn usage(mount: &Mount) -> Option<Usage> {
         used_bytes: blocks
             .saturating_sub(stat.f_bfree as u64)
             .saturating_mul(block),
+        available_bytes: (stat.f_bavail as u64).saturating_mul(block),
     })
 }
 
@@ -485,6 +533,7 @@ mod tests {
                 .map(|&(_, used_bytes, total_bytes)| Usage {
                     total_bytes,
                     used_bytes,
+                    available_bytes: total_bytes - used_bytes,
                 })
         })
     }
@@ -496,6 +545,7 @@ mod tests {
             filesystems,
             fs_used_bytes: used,
             fs_total_bytes: total,
+            fs_available_bytes: total - used,
         }
     }
 
@@ -586,6 +636,79 @@ mod tests {
                 disk("sda", 1000 * 512, 1, 500, 1000),
                 disk("sdb", 3000 * 512, 1, 1500, 3000),
                 disk("sdc", 5000 * 512, 1, 100, 800),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_disk_of_a_mirror_holds_the_whole_filesystem() {
+        let fx = Fixture::new("mirror");
+        // Two disks, each with a small and a large partition; md0 and md1
+        // mirror them pairwise, as a RAID 1 install lays out /boot and /.
+        for (disk, number, minor) in [("nvme0n1", "259:0", 1), ("nvme1n1", "259:8", 9)] {
+            fx.disk(disk, number, 5000, true);
+            fx.partition(
+                disk,
+                &format!("{disk}p2"),
+                &format!("259:{}", minor + 1),
+                1000,
+            );
+            fx.partition(
+                disk,
+                &format!("{disk}p4"),
+                &format!("259:{}", minor + 3),
+                4000,
+            );
+        }
+        for (md, number, partition) in [("md0", "9:0", "p2"), ("md1", "9:1", "p4")] {
+            let dir = fx.disk(md, number, 1000, false);
+            fs::create_dir_all(dir.join("md")).unwrap();
+            fs::write(dir.join("md/level"), "raid1\n").unwrap();
+            fx.slave(md, &format!("nvme0n1{partition}"));
+            fx.slave(md, &format!("nvme1n1{partition}"));
+        }
+        let mountinfo = "\
+30 1 9:1 / / rw - ext4 /dev/md1 rw
+31 30 9:0 / /boot rw - ext4 /dev/md0 rw
+";
+        let disks = sample(&fx, mountinfo, &[], &[("/", 599, 928), ("/boot", 1, 2)]);
+        // Neither row is halved: both read what `df` reports.
+        assert_eq!(
+            disks,
+            vec![
+                disk("nvme0n1", 5000 * 512, 2, 600, 930),
+                disk("nvme1n1", 5000 * 512, 2, 600, 930),
+            ]
+        );
+
+        // A volume group on two mirrors: each mirror holds its part of the
+        // filesystem, and each of its disks holds all of that part.
+        let fx = Fixture::new("mirror-lvm");
+        for (index, disk) in ["sda", "sdb", "sdc", "sdd"].into_iter().enumerate() {
+            fx.disk(disk, &format!("8:{}", index * 16), 3000, true);
+        }
+        for (md, number, sectors, members) in [
+            ("md0", "9:0", 1000, ["sda", "sdb"]),
+            ("md1", "9:1", 3000, ["sdc", "sdd"]),
+        ] {
+            let dir = fx.disk(md, number, sectors, false);
+            fs::create_dir_all(dir.join("md")).unwrap();
+            fs::write(dir.join("md/level"), "raid1\n").unwrap();
+            for member in members {
+                fx.slave(md, member);
+            }
+        }
+        fx.disk("dm-0", "254:0", 4000, false);
+        fx.slave("dm-0", "md0");
+        fx.slave("dm-0", "md1");
+        let mountinfo = "30 1 254:0 / /data rw - xfs /dev/mapper/vg-data rw\n";
+        assert_eq!(
+            sample(&fx, mountinfo, &[], &[("/data", 2000, 4000)]),
+            vec![
+                disk("sda", 3000 * 512, 1, 500, 1000),
+                disk("sdb", 3000 * 512, 1, 500, 1000),
+                disk("sdc", 3000 * 512, 1, 1500, 3000),
+                disk("sdd", 3000 * 512, 1, 1500, 3000),
             ]
         );
     }
@@ -741,6 +864,10 @@ mod tests {
         for disk in &disks {
             assert!(disk.size_bytes > 0, "{disk:?}");
             assert!(disk.fs_used_bytes <= disk.fs_total_bytes, "{disk:?}");
+            assert!(
+                disk.fs_available_bytes <= disk.fs_total_bytes - disk.fs_used_bytes,
+                "{disk:?}"
+            );
             if disk.filesystems == 0 {
                 assert_eq!(disk.fs_total_bytes, 0, "{disk:?}");
             }

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.15+20261124.0105] — 2026-11-24
+
+### Fixed
+
+- Each disk of an MD RAID 1 mirror shows the whole filesystem it holds, as
+  `df` reports it, instead of half of it. On a two-disk mirror both rows read
+  `599.6 / 929.8 GiB` where they read `299.6 / 464.6 GiB`. Filesystems on
+  LVM, striped or parity RAID and btrfs are still divided between their disks.
+
+### Changed
+
+- The disk percentage is `df`'s `Use%`: used space out of what is used or
+  still available, leaving out the blocks a filesystem reserves for root.
+- JSON disk records carry `fs_available_bytes`, `df`'s `Avail`. The field is
+  additive; the schema version stays 2.
+
 ## [0.9.14+20261123.1731] — 2026-11-23
 
 ### Added
