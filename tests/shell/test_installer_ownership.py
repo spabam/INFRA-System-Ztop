@@ -23,6 +23,11 @@ def current_owner():
     return f"{user}:{group}"
 
 
+# The checkout is returned to the account that installs. Started as root there
+# is no such account to return it to, so these run for an ordinary login only.
+as_login = unittest.skipIf(os.geteuid() == 0, 'describes an installation started by an ordinary login; run the tests as that account')
+
+
 class CheckoutOwnership(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ztop ownership ")
@@ -74,6 +79,7 @@ class CheckoutOwnership(unittest.TestCase):
         self.assertEqual(result.stdout, "DONE")
         self.assertEqual(self.recorded(), [])
 
+    @as_login
     def test_start_stage_authenticates_chowns_and_verifies(self):
         # The stub sudo succeeds without changing anything, so verification must fail loudly.
         result = self.run_shell("restore_checkout_ownership start; printf UNEXPECTED", ZTOP_OWNER=FOREIGN)
@@ -83,6 +89,7 @@ class CheckoutOwnership(unittest.TestCase):
         self.assertIn(f'sudo chown -Rf {FOREIGN} "{self.checkout}"', result.stderr)
         self.assertEqual(self.recorded(), ["-n true", self.chown_call()])
 
+    @as_login
     def test_start_stage_without_cached_sudo_or_terminal_explains(self):
         result = self.run_shell("restore_checkout_ownership start; printf UNEXPECTED",
                                 ZTOP_OWNER=FOREIGN, FIXTURE_SUDO_EXIT="1")
@@ -91,6 +98,7 @@ class CheckoutOwnership(unittest.TestCase):
         self.assertIn("no terminal", result.stderr)
         self.assertEqual(self.recorded(), ["-n true"])
 
+    @as_login
     def test_end_stage_only_warns(self):
         body = "if restore_checkout_ownership end; then printf RESTORED; else printf WARNED; fi"
         result = self.run_shell(body, ZTOP_OWNER=FOREIGN)
@@ -105,6 +113,7 @@ class CheckoutOwnership(unittest.TestCase):
         self.assertIn("no longer cached", result.stderr)
         self.assertEqual(self.recorded(), ["-n true"])
 
+    @as_login
     def test_exit_trap_keeps_the_exit_status(self):
         result = self.run_shell("trap finish_checkout_ownership EXIT; exit 7")
         self.assertEqual(result.returncode, 7, result.stderr)

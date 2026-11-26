@@ -1,0 +1,46 @@
+{
+  "$comment": "VANTAGE module manifest: how the platform installer (installer.sh at the workspace root) lists, orders and installs the modules of this folder. Fields: docs in the root README, 'Module manifests'.",
+  "modules": [
+    {
+      "id": "ztop",
+      "label": "Ztop (terminal CPU, GPU and memory monitor)",
+      "group": "system",
+      "order": 190,
+      "phase": "host-after",
+      "installer": "installer.sh",
+      "privilege": "user",
+      "version": {
+        "file": "Cargo.toml",
+        "regex": "(?ms)^\\[package\\].*?^version\\s*=\\s*\"([^\"]+)\""
+      },
+      "fingerprint": [
+        "installer.sh",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "README.md",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "src"
+      ],
+      "build_copy": [
+        "installer.sh",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "README.md",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "src",
+        "scripts/vantage-progress.sh"
+      ],
+      "installed": {
+        "command": [
+          "{PREFIX}/bin/ztop",
+          "--version"
+        ],
+        "expect": "^ztop {version}(\\+|$)"
+      }
+    }
+  ]
+}
