@@ -71,6 +71,16 @@ NVIDIA_DEVICE_COUNT=0
 # --- helpers --------------------------------------------------------------
 
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+# A progress bar is mandatory: each stage reports how far the installation is
+# (scripts/vantage-progress.sh; a line per stage when run on its own).
+ZTOP_SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$ZTOP_SOURCE_DIR/scripts/vantage-progress.sh" ]; then
+    # shellcheck source=scripts/vantage-progress.sh
+    . "$ZTOP_SOURCE_DIR/scripts/vantage-progress.sh"
+else
+    # A copy staged without the helper (an older platform installer) still builds.
+    vantage_progress() { :; }; vantage_progress_done() { :; }
+fi
 warn() { printf '\033[1;33m!! \033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx \033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -192,6 +202,11 @@ run_with_progress() {
     local interval="${PROGRESS_INTERVAL:-10}"
     local started now elapsed pid status
 
+    # ZTOP_PROGRESS="FROM TO SECONDS": the command covers FROM..TO percent and
+    # took SECONDS last time; the bar follows its time against that.
+    local from="" to="" expected="" at
+    if [ -n "${ZTOP_PROGRESS:-}" ]; then read -r from to expected <<< "$ZTOP_PROGRESS"; fi
+
     log "$label"
     "$@" &
     pid=$!
@@ -203,6 +218,11 @@ run_with_progress() {
             now=$(date +%s)
             elapsed=$((now - started))
             log "$label ... still running (${elapsed}s elapsed)"
+            if [ -n "$from" ]; then
+                at=$(awk -v f="$from" -v t="$to" -v e="$elapsed" -v x="${expected:-0}" \
+                    'BEGIN { if (x < 1) x = 300; r = e / x; if (r > 0.95) r = 0.95; printf "%d", f + (t - f) * r }')
+                vantage_progress "$at" "$to" "$label (${elapsed}s)"
+            fi
         fi
     done
 
@@ -845,9 +865,11 @@ do_check() {
 install_ztop() {
     refuse_root_build
     log "ZTOP installer — bootstrapping any missing dependencies"
+    vantage_progress 0 10 'Rust toolchain and build tools'
     sudo_preauth
     ensure_rust
     ensure_build_tools
+    vantage_progress 10 12 'NVIDIA check'
     check_nvidia || warn "NVIDIA preflight failed; the installed monitor will be checked directly after building"
     CARGO_TARGET_DIR="$(cargo_target_dir)"
     export CARGO_TARGET_DIR
@@ -858,8 +880,14 @@ install_ztop() {
     # The explicit || die matters: without it a failed build could fall
     # through to the sudo install step and ship a stale release/ztop left
     # over from an earlier build.
-    run_with_progress "building release binary" cargo build --locked --release --quiet \
+    local build_seconds_file="$CARGO_TARGET_DIR/.vantage-build-seconds" build_seconds build_started
+    build_seconds="$(cat "$build_seconds_file" 2>/dev/null || true)"
+    case "$build_seconds" in ''|*[!0-9]*) build_seconds=0 ;; esac
+    vantage_progress 12 90 'building release binary'
+    build_started=$(date +%s)
+    ZTOP_PROGRESS="12 90 $build_seconds" run_with_progress "building release binary" cargo build --locked --release --quiet \
         || die "release build failed in $CARGO_TARGET_DIR — fix the cargo error above and re-run; nothing was installed"
+    printf '%s\n' "$(( $(date +%s) - build_started ))" > "$build_seconds_file" 2>/dev/null || true
 
     BIN="$CARGO_TARGET_DIR/release/$NAME"
     ensure_executable_artifact "$BIN"
@@ -872,6 +900,7 @@ install_ztop() {
         log "$TARGET already exists; will replace"
     fi
 
+    vantage_progress 90 95 'installing the binary'
     log "installing $TARGET (mode 0755)"
     $SUDO install -D -m 0755 "$BIN" "$TARGET"
 
@@ -883,10 +912,12 @@ install_ztop() {
     fi
 
     log "optional memory management is separate: ./installer.sh --install-ramcleaner"
+    vantage_progress 95 100 'checking GPU monitoring'
     if ! verify_ztop_gpu "$TARGET"; then
         warn "the monitor is installed, but GPU monitoring needs repair; run ./installer.sh --check after fixing the NVIDIA stack"
         return 1
     fi
+    vantage_progress_done 'Ztop installed'
 }
 
 # --- entrypoint -----------------------------------------------------------
